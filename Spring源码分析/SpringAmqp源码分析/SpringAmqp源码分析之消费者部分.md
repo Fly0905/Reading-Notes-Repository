@@ -634,7 +634,7 @@ return (ChannelProxy) Proxy.newProxyInstance(ChannelProxy.class.getClassLoader()
 
 (其中MethodRabbitListenerEndpoint、MultiMethodRabbitListenerEndpoint实现了RabbitListenerEndpoint接口，除这两个实现之外，还有一个实现是SimpleRabbitListenerEndpoint)
 
-![springamqp-classes](..\SpringAmqp源码分析\springamqp-classes.png)
+![springamqp-classes](springamqp-classes.png)
 
 * 一个类级别的@RabbitListener和一个@RabbitHandler会产生一个MultiMethodRabbitListenerEndpoint的实例。
 * 一个方法级别的@RabbitListener会产生一个MethodRabbitListenerEndpoint的实例。
