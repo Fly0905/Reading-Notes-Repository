@@ -142,7 +142,7 @@ public class ConsumerMain {
 
 * **CachedChannelInvocationHandler** ：实现了InvocationHandler，用于JDK原生代理，作用是#getCachedChannelProxy方法中生成ChannelProxy。
 
-* **RabbitResourceHolder** ： 真正存放需要用到的org.springframework.amqp.rabbit.connection.Connection和com.rabbitmq.client.Channle，存放在
+* **RabbitResourceHolder** ： 真正存放需要用到的org.springframework.amqp.rabbit.connection.Connection和com.rabbitmq.client.Channel，存放在
 
   一个叫channelsPerConnection的`Map<Connection, List<Channel>>`，这个类的作用和名字一样，用于持有rabbitmq的必须资源。
 
@@ -1841,7 +1841,7 @@ private Message handle(Delivery delivery) throws InterruptedException {
 
 `Message message = handle(this.queue.poll(timeout, TimeUnit.MILLISECONDS));`，其中timeout默认值为1000，这个this.queue是一个阻塞队列，它的初始化在BlockingQueueConsumer的构造函数中:
 
-`this.queue = new LinkedBlockingQueue<Delivery>(prefetchCount);`(prefetchCount前文也提到过，默认值为1)，这个阻塞队列就是用来存放原生Rabbitmq的消费者逻辑消费后得到的消息体的包装类Delivery。这里还要注意当BlockingQueueConsumer#handle里面有一行代码：
+`this.queue = new LinkedBlockingQueue<Delivery>(prefetchCount);`(prefetchCount前文也提到过，默认值为1)，这个阻塞队列就是用来存放原生Rabbitmq的消费者逻辑消费后得到的消息体的包装类Delivery。这里还要注意BlockingQueueConsumer#handle里面有一行代码：
 
 `this.deliveryTags.add(messageProperties.getDeliveryTag());`,这个deliveryTags是一个HashSet&le;Long&gt;，用于存放消息的tag序号，这个deliveryTags频繁调用到其#clear。#poll获取到的Message实例为null，SimpleMessageListenerContainer#doReceiveAndExecute会跳出for循环直接执行最后的BlockingQueueConsumer#commitIfNecessary：
 
