@@ -23,6 +23,8 @@
 * 属性:首字母小写并且是驼峰
 * 方法:带有#
 
+**本文把发送mq消息的一方称为生产者，接收消息的一方称为消费者，而且把Listener和消费者认为是同一个概念，这些称谓仅仅限于本文**。
+
 ## 源码分析
 
 先看一个rabbitmq:amqp-client的demo:
@@ -982,6 +984,8 @@ protected MessageListenerContainer createListenerContainer(RabbitListenerEndpoin
 
 从上面分析可以知道当RabbitListenerEndpointRegistrar#afterPropertiesSet被调用之后，所有的SimpleRabbitListenerContainer实例的#start方法都调用了，也就是所有的SimpleRabbitListenerContainer都启动了，接下来可以仔细分析SimpleRabbitListenerContainer以及它的工厂类SimpleRabbitListenerContainerFactory。
 
+#### SimpleRabbitListenerContainerFactory与SimpleRabbitListenerContainer
+
 SimpleRabbitListenerContainerFactory从名称上解读：简单的rabbit消费者容器工厂。毫无疑问，它的作用就是生产SimpleRabbitListenerContainer实例。
 
 SimpleRabbitListenerContainerFactory使用了设计模式中的模板方法模式，上文中分析到的**RabbitListenerEndpointRegistry#createListenerContainer**有一句代码:
@@ -1077,14 +1081,20 @@ MethodRabbitListenerEndpoint实现：
 
 ```java
 protected MessagingMessageListenerAdapter createMessageListener(MessageListenerContainer container) {
+        //messageHandlerMethodFactory实例实际上是RabbitHandlerMethodFactoryAdapter的实例，
+        //RabbitHandlerMethodFactoryAdapter是RabbitListenerAnnotationBeanPostProcessor的一个
+        //内部类,它的工厂类为DefaultMessageHandlerMethodFactory。
 		Assert.state(this.messageHandlerMethodFactory != null,
 				"Could not create message listener - MessageHandlerMethodFactory not set");
+        //创建messageListener的实例
 		MessagingMessageListenerAdapter messageListener = createMessageListenerInstance();
+        //设置handlerMethod,可以看做是从目标bean获取到实际的处理method
 		messageListener.setHandlerMethod(configureListenerAdapter(messageListener));
 		String replyToAddress = getDefaultReplyToAddress();
 		if (replyToAddress != null) {
 			messageListener.setResponseAddress(replyToAddress);
 		}
+        //设置消息转换器
 		MessageConverter messageConverter = container.getMessageConverter();
 		if (messageConverter != null) {
 			messageListener.setMessageConverter(messageConverter);
@@ -1098,13 +1108,19 @@ protected MessagingMessageListenerAdapter createMessageListener(MessageListenerC
 protected MessagingMessageListenerAdapter createMessageListenerInstance() {
 		return new MessagingMessageListenerAdapter(this.bean, this.method);
 }  
+
+protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter messageListener) {
+		InvocableHandlerMethod invocableHandlerMethod =
+				this.messageHandlerMethodFactory.createInvocableHandlerMethod(getBean(), getMethod());
+		return new HandlerAdapter(invocableHandlerMethod);
+	}
 ```
 
 由上面的源码可以看出最终设置进去SimpleRabbitListenerContainer实例的MessageListener属性就是MessagingMessageListenerAdapter的实例。
 
 MessagingMessageListenerAdapter继承于AbstractAdaptableMessageListener，实现了**MessageListener**和
 
-**ChannelAwareMessageListener**接口，主要处理逻辑在MessagingMessageListenerAdapter#invokeHandler
+**ChannelAwareMessageListener**接口，主要逻辑在**MessagingMessageListenerAdapter#invokeHandler**
 
 ，这里不打算详细分析MessagingMessageListenerAdapter的实现，知道它直接了MessageListener和
 
@@ -1778,6 +1794,7 @@ private boolean doReceiveAndExecute(BlockingQueueConsumer consumer) throws Throw
 					}
 				}
 				else {
+                    //即使没有事务管理，也会调用回滚方法
 					consumer.rollbackOnExceptionIfNecessary(ex);
 					throw ex;
 				}
@@ -1788,6 +1805,8 @@ private boolean doReceiveAndExecute(BlockingQueueConsumer consumer) throws Throw
 
 	}
 ```
+
+注意上面try-catch中的catch块，#rollbackOnExceptionIfNecessary方法是一定会被调用的，这个方法只有在BlockingQueueConsumer的属性transactional为true的时候才起效，实际上是调用Channel#txRollback，但是#rollbackOnExceptionIfNecessary中存在finally块，里面的deliveryTags#clear是必定会执行的。
 
 Message实例的获取调用了BlockingQueueConsumer#nextMessage：
 
@@ -2044,6 +2063,8 @@ protected void doInvokeListener(ChannelAwareMessageListener listener, Channel ch
 
 到此，SimpleMessageListenerContainer的启动分析完毕，那么重头戏来了，接下来要分析这个消费者体系的核心——**BlockingQueueConsumer**。
 
+#### BlockingQueueConsumer
+
 BlockingQueueConsumer的主要逻辑都集中在#start里面，而上文也提到BlockingQueueConsumer#start是在SimpleMessageListenerContainer$AsyncMessageProcessingConsumer#run中被调用的。BlockingQueueConsumer#start：
 
 ```java
@@ -2246,4 +2267,593 @@ private void consumeFromQueue(String queue) throws IOException {
 注意到Channel#basicConsume会返回一个Sring类型的consumerTag，这个就是队列消费者的唯一标签，consumerTags这个Map就是用来缓存消费者标签和队列名称的，这个consumerTag在broker中也标示出来(可以见篇首的demo)。
 
 到此，SpringAmqp的消费者模块的核心源码大致分析完毕。
+
+### 生产者(Producer)部分源码分析
+
+在SpringAmqp体系中，担任生产者职责的主要是**RabbitTemplate**。RabbitTemplate实现了RabbitOperations和MessageListener接口，也就是说它同时具备生产者和消费者的功能。
+
+#### RabbitTemplage
+
+rabbitTemplate里面有多种消费接发的方法，总结下有下面几种:
+
+* send(直接发送)
+* convertAndSend(转换并发送)
+* receive(接收)
+* receiveAndConvert(接收并转换)
+* receiveAndReply(接收并应答)
+* sendAndReceive(发送并接收)
+* convertSendAndReceive(综合发送、接收和转换三者的功能)
+
+一般来说，这些方法都会有一大堆重载，这时候只要看方法入参最多的方法就行，对于#RabbitTemplate#send：
+
+```java
+public void send(final String exchange, final String routingKey,
+			final Message message, final CorrelationData correlationData)
+			throws AmqpException {
+		execute(new ChannelCallback<Object>() {
+
+			@Override
+			public Object doInRabbit(Channel channel) throws Exception {
+				doSend(channel, exchange, routingKey, message, RabbitTemplate.this.returnCallback != null
+						&& RabbitTemplate.this.mandatoryExpression.getValue(
+								RabbitTemplate.this.evaluationContext, message, Boolean.class),
+						correlationData);
+				return null;
+			}
+		}, obtainTargetConnectionFactory(this.sendConnectionFactorySelectorExpression, message));
+	}
+
+private <T> T execute(final ChannelCallback<T> action, final ConnectionFactory connectionFactory) {
+		if (this.retryTemplate != null) {
+			try {
+				return this.retryTemplate.execute(new RetryCallback<T, Exception>() {
+
+					@Override
+					public T doWithRetry(RetryContext context) throws Exception {
+						return RabbitTemplate.this.doExecute(action, connectionFactory);
+					}
+
+				}, (RecoveryCallback<T>) this.recoveryCallback);
+			}
+			catch (Exception e) {
+				if (e instanceof RuntimeException) {
+					throw (RuntimeException) e;
+				}
+				throw RabbitExceptionTranslator.convertRabbitAccessException(e);
+			}
+		}
+		else {
+			return doExecute(action, connectionFactory);
+		}
+	}
+
+private <T> T doExecute(ChannelCallback<T> action, ConnectionFactory connectionFactory) {
+		Assert.notNull(action, "Callback object must not be null");
+		Channel channel;
+		RabbitResourceHolder resourceHolder = null;
+		Connection connection = null;
+		if (isChannelTransacted()) {
+			resourceHolder = ConnectionFactoryUtils.getTransactionalResourceHolder(connectionFactory, true);
+			channel = resourceHolder.getChannel();
+			if (channel == null) {
+				ConnectionFactoryUtils.releaseResources(resourceHolder);
+				throw new IllegalStateException("Resource holder returned a null channel");
+			}
+		}
+		else {
+			connection = connectionFactory.createConnection(); // NOSONAR - RabbitUtils
+			if (connection == null) {
+				throw new IllegalStateException("Connection factory returned a null connection");
+			}
+			try {
+				channel = connection.createChannel(false);
+				if (channel == null) {
+					throw new IllegalStateException("Connection returned a null channel");
+				}
+			}
+			catch (RuntimeException e) {
+				RabbitUtils.closeConnection(connection);
+				throw e;
+			}
+		}
+		try {
+			if (this.confirmsOrReturnsCapable == null) {
+				determineConfirmsReturnsCapability(connectionFactory);
+			}
+			if (this.confirmsOrReturnsCapable) {
+				addListener(channel);
+			}
+			if (logger.isDebugEnabled()) {
+				logger.debug("Executing callback on RabbitMQ Channel: " + channel);
+			}
+			return action.doInRabbit(channel);
+		}
+		catch (Exception ex) {
+			if (isChannelLocallyTransacted(channel)) {
+				resourceHolder.rollbackAll();
+			}
+			throw convertRabbitAccessException(ex);
+		}
+		finally {
+			if (resourceHolder != null) {
+				ConnectionFactoryUtils.releaseResources(resourceHolder);
+			}
+			else {
+				RabbitUtils.closeChannel(channel);
+				RabbitUtils.closeConnection(connection);
+			}
+		}
+	}
+
+protected void doSend(Channel channel, String exchange, String routingKey, Message message,
+			boolean mandatory, CorrelationData correlationData) throws Exception {
+		if (exchange == null) {
+			// try to send to configured exchange
+			exchange = this.exchange;
+		}
+		if (routingKey == null) {
+			// try to send to configured routing key
+			routingKey = this.routingKey;
+		}
+		if (logger.isDebugEnabled()) {
+			logger.debug("Publishing message on exchange [" + exchange + "], routingKey = [" + routingKey + "]");
+		}
+
+		Message messageToUse = message;
+		MessageProperties messageProperties = messageToUse.getMessageProperties();
+		if (mandatory) {
+			messageProperties.getHeaders().put(PublisherCallbackChannel.RETURN_CORRELATION_KEY, this.uuid);
+		}
+		if (this.beforePublishPostProcessors != null) {
+			for (MessagePostProcessor processor : this.beforePublishPostProcessors) {
+				messageToUse = processor instanceof CorrelationAwareMessagePostProcessor
+						? ((CorrelationAwareMessagePostProcessor) processor)
+								.postProcessMessage(messageToUse, correlationData)
+						: processor.postProcessMessage(messageToUse);
+			}
+		}
+		setupConfirm(channel, messageToUse, correlationData);
+		if (this.userIdExpression != null && messageProperties.getUserId() == null) {
+			String userId = this.userIdExpression.getValue(this.evaluationContext, messageToUse, String.class);
+			if (userId != null) {
+				messageProperties.setUserId(userId);
+			}
+		}
+		BasicProperties convertedMessageProperties = this.messagePropertiesConverter
+				.fromMessageProperties(messageProperties, this.encoding);
+		channel.basicPublish(exchange, routingKey, mandatory, convertedMessageProperties, messageToUse.getBody());
+		// Check if commit needed
+		if (isChannelLocallyTransacted(channel)) {
+			// Transacted channel created by this template -> commit.
+			RabbitUtils.commitIfNecessary(channel);
+		}
+	}
+
+private ConnectionFactory obtainTargetConnectionFactory(Expression expression, Object rootObject) {
+		if (expression != null && getConnectionFactory() instanceof AbstractRoutingConnectionFactory) {
+			AbstractRoutingConnectionFactory routingConnectionFactory =
+					(AbstractRoutingConnectionFactory) getConnectionFactory();
+			Object lookupKey;
+			if (rootObject != null) {
+				lookupKey = this.sendConnectionFactorySelectorExpression.getValue(this.evaluationContext, rootObject);
+			}
+			else {
+				lookupKey = this.sendConnectionFactorySelectorExpression.getValue(this.evaluationContext);
+			}
+			if (lookupKey != null) {
+				ConnectionFactory connectionFactory = routingConnectionFactory.getTargetConnectionFactory(lookupKey);
+				if (connectionFactory != null) {
+					return connectionFactory;
+				}
+				else if (!routingConnectionFactory.isLenientFallback()) {
+					throw new IllegalStateException("Cannot determine target ConnectionFactory for lookup key ["
+							+ lookupKey + "]");
+				}
+			}
+		}
+		return getConnectionFactory();
+	}
+
+```
+
+一个简单的#send依赖了四个比较长的方法，分别是#execute，#doSend，#obtainTargetConnectionFactory以及#execute里面调用到的#doExecute，下面按顺序分析一下源码。
+
+* 方法#send首先调用#execute，注意#execute的第一个入参为ChannelCallback，这是一个回调接口，这里匿名实现了ChannelCallback#doInRabbit，实现的方式就是调用了#doSend；第二个入参为ConnectionFactory(由#obtainTargetConnectionFactory来获取ConnectionFactory的实例)，主要目的是通过ConnectionFactory获取Channel。
+* 方法#execute的主要功能是先判断有没有设置RetryTemplate(重试模板)，如果有则通过RetryTemplate调用#doExecute，否则直接调用#doExecute(注意ChannelCallback参数透传到#doExecute)。
+* 方法#obtainTargetConnectionFactory主要是先判断当前ConnectionFactory是否继承了AbstractRoutingConnectionFactory，如果继承了此类，说明是配置了多Mq实例(SpringAmqp的Listener注解体系不支持多Mq实例，但是Producer部分是支持的，主要依赖于SimpleRoutingConnectionFactory)，需要根据lookupKey获取当前需要使用的ConnectionFactory实例，否则直接返回RabbitTemplate持有的ConnectionFactory实例(一般是CachingConnectionFactory的实例)。
+* 接着进入方法#doExecute，首先通过#isChannelTransacted判断是否存在事务，如果是则从ConnectionFactoryUtils#getTransactionalResourceHolder获取RabbitResourceHolder实例，再通过RabbitResourceHolder获取Channel(见前几部分的分析)，如果不存在事务，直接从当前的ConnectionFactory获取Connection和Channel，然后设置和消息确认以及消息返回(**消息确认和消息返回这点内容开一个小节详细说明**)相关的内容包括监听器等，调用透传进来的ChannelCallback#doInRabbit，最后做资源的释放操作。
+* 最后就是核心操作方法#doSend，先做入参状态判断，然后设置MessageProperties(涉及到消息参数转操作，需要使用到DefaultMessagePropertiesConverter，目的是为了和**com.rabbitmq.client.AMQP**里面的协议一致)，接着调用所有的MessagePostProcessor(如果存在的话)，然后建立消息确认机制(如果需要的话)，最后调用Channel#basicPublish，释放事务所需资源(如果存在事务的话)。
+
+方法#send的入参中除了必须的exchange，routingKey，CorrelationData，它要求消息体是Message类型，而方法#convertAndSend提供了消息体转换机制，可以传入一个Object类型的消息实体：
+
+```java
+public void convertAndSend(String exchange, String routingKey, final Object object, CorrelationData correlationData) throws AmqpException {
+		send(exchange, routingKey, convertMessageIfNecessary(object), correlationData);
+}
+
+ protected Message convertMessageIfNecessary(final Object object) {
+		if (object instanceof Message) {
+			return (Message) object;
+		}
+		return getRequiredMessageConverter().toMessage(object, new MessageProperties());
+	}
+```
+
+其中#getRequiredMessageConverter()就是获取当前RabbitTemplate的MessageConverter实例(默认提供一个SimpleMessageConverter的实例)，直接把Object类型的消息体转化为Message，然后调用#send。
+
+方法#receive有点像Listener的功能，最要按照是否设置超时时间timeoutMillis区分两种类型：
+
+```java
+public Message receive(long timeoutMillis) throws AmqpException {
+		String queue = getRequiredQueue();
+		if (timeoutMillis == 0) {
+			return doReceiveNoWait(queue);
+		}
+		else {
+			return receive(queue, timeoutMillis);
+		}
+	}
+
+protected Message doReceiveNoWait(final String queueName) {
+		return execute(new ChannelCallback<Message>() {
+
+			@Override
+			public Message doInRabbit(Channel channel) throws IOException {
+				GetResponse response = channel.basicGet(queueName, !isChannelTransacted());
+				// Response can be null is the case that there is no message on the queue.
+				if (response != null) {
+					long deliveryTag = response.getEnvelope().getDeliveryTag();
+					if (isChannelLocallyTransacted(channel)) {
+						channel.basicAck(deliveryTag, false);
+						channel.txCommit();
+					}
+					else if (isChannelTransacted()) {
+						// Not locally transacted but it is transacted so it
+						// could be synchronized with an external transaction
+						ConnectionFactoryUtils.registerDeliveryTag(getConnectionFactory(), channel, deliveryTag);
+					}
+
+					return RabbitTemplate.this.buildMessageFromResponse(response);
+				}
+				return null;
+			}
+		}, obtainTargetConnectionFactory(this.receiveConnectionFactorySelectorExpression, queueName));
+	}
+
+public Message receive(final String queueName, final long timeoutMillis) {
+		return execute(new ChannelCallback<Message>() {
+
+			@SuppressWarnings("deprecation")
+			@Override
+			public Message doInRabbit(Channel channel) throws Exception {
+				com.rabbitmq.client.QueueingConsumer consumer = createQueueingConsumer(queueName, channel);
+				com.rabbitmq.client.QueueingConsumer.Delivery delivery;
+				if (timeoutMillis < 0) {
+					delivery = consumer.nextDelivery();
+				}
+				else {
+					delivery = consumer.nextDelivery(timeoutMillis);
+				}
+				channel.basicCancel(consumer.getConsumerTag());
+				if (delivery == null) {
+					return null;
+				}
+				else {
+					if (isChannelLocallyTransacted(channel)) {
+						channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+						channel.txCommit();
+					}
+					else if (isChannelTransacted()) {
+						ConnectionFactoryUtils.registerDeliveryTag(getConnectionFactory(), channel,
+								delivery.getEnvelope().getDeliveryTag());
+					}
+					else {
+						channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+					}
+					return buildMessageFromDelivery(delivery);
+				}
+			}
+
+		});
+	}
+```
+
+当参数timeoutMillis设置为0的时候，就直接调用#doReceiveNoWait，还是使用了#execute进行回调，#doInRabbit里面实际上是调用了Channel#basicGet，然后调用RabbitTemplate#buildMessageFromResponse转化为Message对象返回；如果timeoutMillis设置的值不为0时，调用#receive(queueName，timeoutMillis)，使用了#execute进行回调，#doInRabbit里面直接使用原生的QueueingConsumer通过#createQueueingConsumer实际上调用Channel#basicConsume和Channel#basicAck把获取到的Delivery转化为Message对象并且返回。
+
+方法#receiveAndConvert其实就是在##receive的基础上加上返回值转化，直接返回一个Object对象。
+
+方法#receiveAndReply，具体实现是调用#doReceiveAndReply：
+
+```java
+private <R, S> boolean doReceiveAndReply(final String queueName, final ReceiveAndReplyCallback<R, S> callback,
+											 final ReplyToAddressCallback<S> replyToAddressCallback) throws AmqpException {
+		return this.execute(new ChannelCallback<Boolean>() {
+
+			@SuppressWarnings("deprecation")
+			@Override
+			public Boolean doInRabbit(Channel channel) throws Exception {
+				boolean channelTransacted = isChannelTransacted();
+				Message receiveMessage = null;
+				boolean channelLocallyTransacted = isChannelLocallyTransacted(channel);
+
+				if (RabbitTemplate.this.receiveTimeout == 0) {
+					GetResponse response = channel.basicGet(queueName, !channelTransacted);
+					// Response can be null in the case that there is no message on the queue.
+					if (response != null) {
+						long deliveryTag = response.getEnvelope().getDeliveryTag();
+
+						if (channelLocallyTransacted) {
+							channel.basicAck(deliveryTag, false);
+						}
+						else if (channelTransacted) {
+							// Not locally transacted but it is transacted so it could be
+							// synchronized with an external transaction
+							ConnectionFactoryUtils.registerDeliveryTag(getConnectionFactory(), channel, deliveryTag);
+						}
+						receiveMessage = buildMessageFromResponse(response);
+					}
+				}
+				else {
+					com.rabbitmq.client.QueueingConsumer consumer = createQueueingConsumer(queueName, channel);
+					com.rabbitmq.client.QueueingConsumer.Delivery delivery;
+					if (RabbitTemplate.this.receiveTimeout < 0) {
+						delivery = consumer.nextDelivery();
+					}
+					else {
+						delivery = consumer.nextDelivery(RabbitTemplate.this.receiveTimeout);
+					}
+					channel.basicCancel(consumer.getConsumerTag());
+					if (delivery != null) {
+						long deliveryTag = delivery.getEnvelope().getDeliveryTag();
+						if (channelTransacted && !channelLocallyTransacted) {
+							// Not locally transacted but it is transacted so it could be
+							// synchronized with an external transaction
+							ConnectionFactoryUtils.registerDeliveryTag(getConnectionFactory(), channel, deliveryTag);
+						}
+						else {
+							channel.basicAck(deliveryTag, false);
+						}
+						receiveMessage = buildMessageFromDelivery(delivery);
+					}
+				}
+				if (receiveMessage != null) {
+					Object receive = receiveMessage;
+					if (!(ReceiveAndReplyMessageCallback.class.isAssignableFrom(callback.getClass()))) {
+						receive = RabbitTemplate.this.getRequiredMessageConverter().fromMessage(receiveMessage);
+					}
+
+					S reply;
+					try {
+						reply = callback.handle((R) receive);
+					}
+					catch (ClassCastException e) {
+						StackTraceElement[] trace = e.getStackTrace();
+						if (trace[0].getMethodName().equals("handle") && trace[1].getFileName().equals("RabbitTemplate.java")) {
+							throw new IllegalArgumentException("ReceiveAndReplyCallback '" + callback
+									+ "' can't handle received object '" + receive + "'", e);
+						}
+						else {
+							throw e;
+						}
+					}
+
+					if (reply != null) {
+						Address replyTo = replyToAddressCallback.getReplyToAddress(receiveMessage, reply);
+
+						Message replyMessage = RabbitTemplate.this.convertMessageIfNecessary(reply);
+
+						MessageProperties receiveMessageProperties = receiveMessage.getMessageProperties();
+						MessageProperties replyMessageProperties = replyMessage.getMessageProperties();
+
+						Object correlation = RabbitTemplate.this.correlationKey == null
+								? receiveMessageProperties.getCorrelationId()
+								: receiveMessageProperties.getHeaders().get(RabbitTemplate.this.correlationKey);
+
+						if (RabbitTemplate.this.correlationKey == null || correlation == null) {
+							// using standard correlationId property
+							if (correlation == null) {
+								String messageId = receiveMessageProperties.getMessageId();
+								if (messageId != null) {
+									correlation = messageId.getBytes(RabbitTemplate.this.encoding);
+								}
+							}
+							replyMessageProperties.setCorrelationId((byte[]) correlation);
+						}
+						else {
+							replyMessageProperties.setHeader(RabbitTemplate.this.correlationKey, correlation);
+						}
+
+						// 'doSend()' takes care of 'channel.txCommit()'.
+						RabbitTemplate.this.doSend(
+								channel,
+								replyTo.getExchangeName(),
+								replyTo.getRoutingKey(),
+								replyMessage,
+								RabbitTemplate.this.returnCallback != null && RabbitTemplate.this.mandatoryExpression
+										.getValue(RabbitTemplate.this.evaluationContext, replyMessage, Boolean.class),
+								null);
+					}
+					else if (channelLocallyTransacted) {
+						channel.txCommit();
+					}
+
+					return true;
+				}
+				return false;
+			}
+		}, obtainTargetConnectionFactory(this.receiveConnectionFactorySelectorExpression, queueName));
+	}
+```
+
+方法#doReceiveAndReply的前边一段代码实现的逻辑和#receive一致，获取到返回值为Message对象，接着调用入参ReceiveAndReplyCallback(这个是接口，需要外部自行实行)的#handle获取到S(泛型)的返回值reply，当reply不为null的时候，通过ReplyToAddressCallback(这个是接口，需要外部自行实行)获取到的Address(带有exchange和routingKey)以及设置MessageProperties并且调用RabbitTemplate#send实现应答。其实就是在收到某个队列的消息的时候可以控制向其他队列发送应答。
+
+方法#sendAndReceive的逻辑相对复杂，因为涉及到发送并且接受消息两个环节，主要由#doSendAndReceive实现：
+
+```java
+protected Message doSendAndReceive(final String exchange, final String routingKey, final Message message,
+			CorrelationData correlationData) {
+		if (!this.evaluatedFastReplyTo) {
+			synchronized (this) {
+				if (!this.evaluatedFastReplyTo) {
+					evaluateFastReplyTo();
+				}
+			}
+		}
+		if (this.replyAddress == null || this.usingFastReplyTo) {
+			return doSendAndReceiveWithTemporary(exchange, routingKey, message, correlationData);
+		}
+		else {
+			return doSendAndReceiveWithFixed(exchange, routingKey, message, correlationData);
+		}
+	}
+
+protected Message doSendAndReceiveWithTemporary(final String exchange, final String routingKey,
+			final Message message, final CorrelationData correlationData) {
+		return this.execute(new ChannelCallback<Message>() {
+
+			@Override
+			public Message doInRabbit(Channel channel) throws Exception {
+				final PendingReply pendingReply = new PendingReply();
+				String messageTag = String.valueOf(RabbitTemplate.this.messageTagProvider.incrementAndGet());
+				RabbitTemplate.this.replyHolder.put(messageTag, pendingReply);
+
+				Assert.isNull(message.getMessageProperties().getReplyTo(),
+						"Send-and-receive methods can only be used if the Message does not already have a replyTo property.");
+				String replyTo;
+				if (RabbitTemplate.this.usingFastReplyTo) {
+					replyTo = Address.AMQ_RABBITMQ_REPLY_TO;
+				}
+				else {
+					DeclareOk queueDeclaration = channel.queueDeclare();
+					replyTo = queueDeclaration.getQueue();
+				}
+				message.getMessageProperties().setReplyTo(replyTo);
+
+				String consumerTag = UUID.randomUUID().toString();
+				DefaultConsumer consumer = new DefaultConsumer(channel) {
+
+					@Override
+					public void handleDelivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties,
+											   byte[] body) throws IOException {
+						MessageProperties messageProperties = RabbitTemplate.this.messagePropertiesConverter
+								.toMessageProperties(properties, envelope, RabbitTemplate.this.encoding);
+						Message reply = new Message(body, messageProperties);
+						if (logger.isTraceEnabled()) {
+							logger.trace("Message received " + reply);
+						}
+						pendingReply.reply(reply);
+					}
+				};
+				channel.basicConsume(replyTo, true, consumerTag, true, true, null, consumer);
+				Message reply = null;
+				try {
+					reply = exchangeMessages(exchange, routingKey, message, correlationData, channel, pendingReply,
+							messageTag);
+				}
+				finally {
+					RabbitTemplate.this.replyHolder.remove(messageTag);
+					try {
+						channel.basicCancel(consumerTag);
+					}
+					catch (Exception e) { }
+				}
+				return reply;
+			}
+		}, obtainTargetConnectionFactory(this.sendConnectionFactorySelectorExpression, message));
+	}
+
+protected Message doSendAndReceiveWithFixed(final String exchange, final String routingKey, final Message message,
+			final CorrelationData correlationData) {
+		Assert.state(this.isListener, "RabbitTemplate is not configured as MessageListener - "
+							+ "cannot use a 'replyAddress': " + this.replyAddress);
+		return this.execute(new ChannelCallback<Message>() {
+
+			@SuppressWarnings("deprecation")
+			@Override
+			public Message doInRabbit(Channel channel) throws Exception {
+				final PendingReply pendingReply = new PendingReply();
+				String messageTag = String.valueOf(RabbitTemplate.this.messageTagProvider.incrementAndGet());
+				RabbitTemplate.this.replyHolder.put(messageTag, pendingReply);
+				// Save any existing replyTo and correlation data
+				String savedReplyTo = message.getMessageProperties().getReplyTo();
+				pendingReply.setSavedReplyTo(savedReplyTo);
+				if (StringUtils.hasLength(savedReplyTo) && logger.isDebugEnabled()) {
+					logger.debug("Replacing replyTo header:" + savedReplyTo
+							+ " in favor of template's configured reply-queue:"
+							+ RabbitTemplate.this.replyAddress);
+				}
+				message.getMessageProperties().setReplyTo(RabbitTemplate.this.replyAddress);
+				String savedCorrelation = null;
+				if (RabbitTemplate.this.correlationKey == null) { // using standard correlationId property
+					byte[] correlationId = message.getMessageProperties().getCorrelationId();
+					if (correlationId != null) {
+						savedCorrelation = new String(correlationId,
+								RabbitTemplate.this.encoding);
+					}
+				}
+				else {
+					savedCorrelation = (String) message.getMessageProperties()
+							.getHeaders().get(RabbitTemplate.this.correlationKey);
+				}
+				pendingReply.setSavedCorrelation(savedCorrelation);
+				if (RabbitTemplate.this.correlationKey == null) { // using standard correlationId property
+					message.getMessageProperties().setCorrelationId(messageTag
+							.getBytes(RabbitTemplate.this.encoding));
+				}
+				else {
+					message.getMessageProperties().setHeader(
+							RabbitTemplate.this.correlationKey, messageTag);
+				}
+
+				if (logger.isDebugEnabled()) {
+					logger.debug("Sending message with tag " + messageTag);
+				}
+				Message reply = null;
+				try {
+					reply = exchangeMessages(exchange, routingKey, message, correlationData, channel, pendingReply,
+							messageTag);
+				}
+				finally {
+					RabbitTemplate.this.replyHolder.remove(messageTag);
+				}
+				return reply;
+			}
+		}, obtainTargetConnectionFactory(this.sendConnectionFactorySelectorExpression, message));
+	}
+
+```
+
+当属性replyAddress为null或者usingFastReplyTo为true的时候，调用#doSendAndReceiveWithTemporary，此方法主要使用#execute，在回调里面#doInRabbit先新建一个PendingReply实例(里面包含一个阻塞队列，用于存放消费者获得的消息)，replyHolder这个ConcurrentHashMap用于存放messageTage(一个AtomicInteger控制自增以区分不同的消息tag)，设置Message的MessageProperties，然后新建一个DefaultConsumer并且使用Channel#basicConsume，DefaultConsumer#handleDelivery回调的消息体存放在PendingReply的阻塞队列里面。然后调用#exchangeMessages实际上就是再设置必须的MessageProperties最后调用#send。这个方法的主要目的是同时实现发送消息和监听消息。注意到一个代码块:
+
+```java
+              if (RabbitTemplate.this.usingFastReplyTo) {
+					replyTo = Address.AMQ_RABBITMQ_REPLY_TO;
+				}
+				else {
+					DeclareOk queueDeclaration = channel.queueDeclare();
+					replyTo = queueDeclaration.getQueue();
+				}
+```
+
+这个代码块就是获取当前的Channel对象对应的queueName，应答的队列也就这样得到的，如果usingFastReplyTo属性设置为true会直接使用常量(amq.rabbitmq.reply-to)作为队列名。
+
+最后一个方法#convertSendAndReceive实际上就是sendAndReceive的强化，提供入参Message的转换为Object以及返回值由Message转换为Object：
+
+```java
+public Object convertSendAndReceive(final String exchange, final String routingKey, final Object message,
+			final MessagePostProcessor messagePostProcessor, final CorrelationData correlationData) throws AmqpException {
+		Message replyMessage = convertSendAndReceiveRaw(exchange, routingKey, message, messagePostProcessor,
+				correlationData);
+		if (replyMessage == null) {
+			return null;
+		}
+		return this.getRequiredMessageConverter().fromMessage(replyMessage);
+	}
+```
+
+到此为止，SpringAmqp生产者部分的核心源码大致分析完毕。最后一个小节将会分析一下RabbitTemplate发送消息的消息确认机制以及消息返回。
+
+#### 消息确认机制以及消息返回
+
+
 
