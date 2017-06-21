@@ -2861,5 +2861,325 @@ public Object convertSendAndReceive(final String exchange, final String routingK
 
 #### 消息确认机制以及消息返回
 
+SpringAmqp的消息确认机制以及消息返回依赖RabbitTemplate的ConfirmCallback接口和RabbitTemplate 的接口ReturnCallback，依赖的实现类有PublisherCallbackChannelImpl、ChannelN，因为已经入侵到Rabbitmq的java客户端源码，这里不打算详细分析，只通过实战说明SpringAmqp通过RabbitTemplate怎么样可以实现发送的消息**绝对不会丢失**(如果是人为导致路由错误，例如本应该推送到A队列的消息被推送到了B队列，那么也不能够说是消息丢失了)。
 
+先搭建一个用于验证的[Springboot项目](https://github.com/zjcscut/springamqp-confirm-return)
+
+配置类RabbitmqConfiguration:
+
+```java
+package org.throwable.configuration;
+
+import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.throwable.listener.ConfirmCallbackListener;
+import org.throwable.listener.ReturnCallbackListener;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 0:47
+ */
+@Configuration
+public class RabbitmqConfiguration {
+
+	@Bean
+	public ConnectionFactory connectionFactory() {
+		CachingConnectionFactory factory = new CachingConnectionFactory("localhost", 5672);
+		factory.setUsername("guest");
+		factory.setPassword("guest");
+		factory.setVirtualHost("/");
+		//使setConfirmCallback生效
+		factory.setPublisherConfirms(true);
+		//使setReturnCallback生效
+		factory.setPublisherReturns(true);
+		return factory;
+	}
+
+	@Bean
+	public RabbitAdmin rabbitAdmin(ConnectionFactory connectionFactory) {
+		return new RabbitAdmin(connectionFactory);
+	}
+
+	@Bean
+	public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory) {
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
+		rabbitTemplate.setEncoding("UTF-8");
+		rabbitTemplate.setMessageConverter(new Jackson2JsonMessageConverter());
+		//如果要使得setReturnCallback生效,mandatory必须为true,否则无法获取返回的消息
+		rabbitTemplate.setMandatory(true);
+		rabbitTemplate.setReturnCallback(new ReturnCallbackListener());
+		rabbitTemplate.setConfirmCallback(new ConfirmCallbackListener());
+		return rabbitTemplate;
+	}
+
+	@Bean
+	public Queue queue() {
+		return new Queue("CONFIRM_TEST", true);
+	}
+
+	@Bean
+	public Exchange exchange() {
+		return new DirectExchange("DIRECT_EX", true, false);
+	}
+
+	@Bean
+	public Binding binding(Queue queue, Exchange exchange) {
+		return BindingBuilder.bind(queue).to(exchange).with("ROUTING_KEY").noargs();
+	}
+}
+
+```
+
+消息实体MessageTarget:
+
+```java
+package org.throwable.entity;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 1:05
+ */
+public class MessageTarget {
+
+	private String id;
+	private String body;
+
+	public MessageTarget() {
+	}
+
+	public MessageTarget(String id, String body) {
+		this.id = id;
+		this.body = body;
+	}
+
+	public String getId() {
+		return id;
+	}
+
+	public void setId(String id) {
+		this.id = id;
+	}
+
+	public String getBody() {
+		return body;
+	}
+
+	public void setBody(String body) {
+		this.body = body;
+	}
+}
+
+```
+
+ConfirmCallbackListener:
+
+```java
+package org.throwable.listener;
+
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.support.CorrelationData;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 0:58
+ */
+public class ConfirmCallbackListener implements RabbitTemplate.ConfirmCallback {
+
+	@Override
+	public void confirm(CorrelationData correlationData, boolean ack, String cause) {
+		System.out.println("ConfirmCallbackListener>>confirm--:correlationData:" + correlationData + ",ack:" + ack + ",cause:" + cause);
+	}
+}
+
+```
+
+ReturnCallbackListener:
+
+```java
+package org.throwable.listener;
+
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 0:59
+ */
+public class ReturnCallbackListener implements RabbitTemplate.ReturnCallback {
+
+	@Override
+	public void returnedMessage(Message message, int replyCode, String replyText, String exchange, String routingKey) {
+		System.out.println("ReturnCallbackListener>>return--message:" + new String(message.getBody()) + ",replyCode:" + replyCode + ",replyText:" + replyText + ",exchange:" + exchange + ",routingKey:" + routingKey);
+	}
+}
+
+```
+
+Service:
+
+```java
+package org.throwable.service;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.support.CorrelationData;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.throwable.entity.MessageTarget;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 1:03
+ */
+@Service
+public class PublishService {
+
+	@Autowired
+	private RabbitTemplate rabbitTemplate;
+
+	public void send(String exchange, String routingKey, MessageTarget target) {
+		CorrelationData correlationData = new CorrelationData(target.getId());
+		rabbitTemplate.convertAndSend(exchange, routingKey, target, correlationData);
+	}
+}
+
+```
+
+测试类以及结果:
+
+```java
+package org.throwable.service;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.throwable.Application;
+import org.throwable.entity.MessageTarget;
+
+import static org.junit.Assert.*;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/6/22 1:06
+ */
+@RunWith(SpringJUnit4ClassRunner.class)
+@SpringBootTest(classes = Application.class)
+public class PublishServiceTest {
+
+	@Autowired
+	private PublishService publishService;
+
+	/**
+	 * 注意Callback都是异步的,要sleep一下等待返回
+	 * 正确的Exchange名为:DIRECT_EX,并且是DirectExchange
+	 * 正确的ROUTING_KEY为:ROUTING_KEY
+	 * 下面分九种情况验证所有组合
+	 */
+
+	@Test
+	public void send1() throws Exception {
+		String message = System.currentTimeMillis() + "$$send1";
+		MessageTarget target = new MessageTarget("send1", message);
+		publishService.send("DIRECT_EX", "ROUTING_KEY", target);
+		Thread.sleep(1000);
+		//exchange、routingKey都正确
+		//只有ConfirmCallbackListener被回调
+		//ConfirmCallbackListener回调结果:ConfirmCallbackListener>>confirm--:correlationData:CorrelationData [id=send1],ack:true,cause:null
+		//分析:confirm被回调,ack=true
+	}
+
+	@Test
+	public void send2() throws Exception {
+		String message = System.currentTimeMillis() + "$$send2";
+		MessageTarget target = new MessageTarget("send2", message);
+		publishService.send("DIRECT_EX", "ROUTING_KEY_ERROR", target);
+		Thread.sleep(1000);
+		//exchange正确,routingKey错误
+		//ConfirmCallbackListener、ReturnCallbackListener都被回调
+		//ConfirmCallbackListener回调结果:ConfirmCallbackListener>>confirm--:correlationData:CorrelationData [id=send2],ack:true,cause:null
+		//ReturnCallbackListener:ReturnCallbackListener>>return--message:{"id":"send2","body":"1498066015931$$send2"},replyCode:312,replyText:NO_ROUTE,exchange:DIRECT_EX,routingKey:ROUTING_KEY_ERROR
+		//分析:confirm被回调,ack=true;return被回调,返回发送具体内容以及原因replyText:NO_ROUTE(路由失败)
+	}
+
+	@Test
+	public void send3() throws Exception {
+		String message = System.currentTimeMillis() + "$$send3";
+		MessageTarget target = new MessageTarget("send3", message);
+		publishService.send("DIRECT_EX_ERROR", "ROUTING_KEY", target);
+		Thread.sleep(1000);
+		//exchange错误,routingKey正确
+		//只有ConfirmCallbackListener被回调
+		//ConfirmCallbackListener回调结果:ConfirmCallbackListener>>confirm--:correlationData:CorrelationData [id=send3],ack:false,cause:channel error; protocol method: #method<channel.close>(reply-code=404, reply-text=NOT_FOUND - no exchange 'DIRECT_EX_ERROR' in vhost '/', class-id=60, method-id=40)
+		//分析:confirm被回调,ack=false,原因描述=no exchange 'DIRECT_EX_ERROR' in vhost '/'
+		//抛出了异常:Channel shutdown: channel error; protocol method: #method<channel.close>(reply-code=404, reply-text=NOT_FOUND - no exchange 'DIRECT_EX_ERROR' in vhost '/', class-id=60, method-id=40)
+	}
+
+	@Test
+	public void send4() throws Exception {
+		String message = System.currentTimeMillis() + "$$send4";
+		MessageTarget target = new MessageTarget("send4", message);
+		publishService.send("DIRECT_EX_ERROR", "ROUTING_KEY_ERROR", target);
+		Thread.sleep(1000);
+		//exchange、routingKey都错误
+		//只有ConfirmCallbackListener被回调
+		//ConfirmCallbackListener回调结果:ConfirmCallbackListener>>confirm--:correlationData:CorrelationData [id=send4],ack:false,cause:channel error; protocol method: #method<channel.close>(reply-code=404, reply-text=NOT_FOUND - no exchange 'DIRECT_EX_ERROR' in vhost '/', class-id=60, method-id=40)
+		//分析:confirm被回调,ack=false,原因描述=no exchange 'DIRECT_EX_ERROR' in vhost '/'
+		//抛出了异常:Channel shutdown: channel error; protocol method: #method<channel.close>(reply-code=404, reply-text=NOT_FOUND - no exchange 'DIRECT_EX_ERROR' in vhost '/', class-id=60, method-id=40)
+	}
+
+
+}
+```
+
+结果分析：
+
+* **如果消息没有到exchange,则confirm回调,ack=false。**
+* **如果消息到达exchange,则confirm回调,ack=true。**
+* **exchange和routingKey都正确，即exchange到queue成功,则不回调return。**
+* **exchange正确，routingKey错误，即exchange到queue成功,则回调return(需设置mandatory=true,否则不回回调，消息就丢失了)。**
+
+个人认为的最佳实践：
+
+**除了人为发送错误之前，要保证消息不丢失，区分三类情况：**
+
+* 第一类是正常发送，保证confirm回调中ack为true同时接收不到return回调。
+* 第二类是路由错误的，保证confirm回调中ack为true，如果接收到return回调，里面返回了消息的具体内容，可以实现记录、预警或者重发等功能。
+* 第三类很是exchange声明或使用错误，此时confirm回调中ack为false，消息没有到达exchange，而confirm回调中只带有CorrelationData的实例，也就是只记录了消息的id，不能从CorrelationData中获取到发送的消息内容，这个时候可以考虑使用一个中间变量记录发送前的消息、exchange、routingKey、CorrelationData，当confirm回调中ack为false的时候，可以对中间变量存储的内容进行操作，如果confirm回调中ack为true可以直接清空中间变量。
+
+如果熟悉这些消息确认和返回机制，完全可以做到发送时不丢任何消息。
+
+
+
+### 后记
+
+参考资料：SpringAmqp源码，基于spring-boot-starter-amqp，版本1.5.3.RELEASE
+
+项目扩展：[SpringAmqp多Mq实例消费者支持](https://github.com/zjcscut/slime)
+
+消息确认机制以及消息返回验证项目：[消息确认以及返回](https://github.com/zjcscut/springamqp-confirm-return)
+
+End on 2017-6-22 2:05.
+Help yourselves!
+我是throwable,在广州奋斗，白天上班，晚上和双休不定时加班，晚上有空坚持写下博客。
+希望我的文章能够给你带来收获，共勉。
 
