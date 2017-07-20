@@ -15,7 +15,7 @@
 
 Spring-Aop的第一点限制，其实官方文档也有详细说明，大致如下：
 
-![spring-aop](/spring-aop.png)
+![spring-aop](spring-aop.png)
 
 而SpringCache中的所有注解的处理逻辑都是通过Aop实现，因此如果使用过程中出现不生效等情况，很有可能是因为使用了类内方法的自调用。
 
@@ -23,7 +23,7 @@ Spring-Aop的第一点限制，其实官方文档也有详细说明，大致如�
 
 ## Spring-context中cache的package结构
 
-![spring-context](/spring-context.png)
+![spring-context](spring-context.png)
 
 * annotation包：存放@Cacheable、@CacheEvict等注解以及它们的配置和解析类。
 * concurrent包：存放基于ConcurrentMap的Cache接口实现，对应的FactoryBean以及CacheManager接口的实现。
