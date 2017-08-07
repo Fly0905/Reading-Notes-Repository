@@ -290,7 +290,7 @@ AbstractApplicationContext#prepareRefresh：刷新上下文前的准备方法，
 
 ### obtainFreshBeanFactory
 
-obtainFreshBeanFactory（**这个方法十分重要**），作用是获取新的BeanFactory。
+AbstractApplicationContext#obtainFreshBeanFactory（**这个方法十分重要**），作用是获取新的BeanFactory。
 
 ```java
     protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
@@ -403,9 +403,120 @@ protected void prepareBeanFactory(ConfigurableListableBeanFactory beanFactory) {
 
 ### postProcessBeanFactory
 
-postProcessBeanFactory、invokeBeanFactoryPostProcessors、registerBeanPostProcessors这三个方法是刷新Spring应用上下文的重要方法。一般，我们要获取ClassPath下的所有类，必须要扫描指定包下面的所有类，而扫描指定包下的所有类这个动作是由postProcessBeanFactory的深层调用链触发的。
+AbstractApplicationContext#postProcessBeanFactory、AbstractApplicationContext#invokeBeanFactoryPostProcessors、AbstractApplicationContextregisterBeanPostProcessors这三个方法是刷新Spring应用上下文的重要方法。AbstractApplicationContext#postProcessBeanFactory方法的详细内容见GenericWebApplicationContext#postProcessBeanFactory，依赖于前边创建的ConfigurableListableBeanFactory实例。
+
+```java
+protected void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+		beanFactory.addBeanPostProcessor(new ServletContextAwareProcessor(this.servletContext));
+		beanFactory.ignoreDependencyInterface(ServletContextAware.class);
+
+		WebApplicationContextUtils.registerWebApplicationScopes(beanFactory, this.servletContext);
+		WebApplicationContextUtils.registerEnvironmentBeans(beanFactory, this.servletContext);
+	}
+```
+
+分析下大致过程：
+
+* 添加一个BeanPostProcessor为ServletContextAwareProcessor，同时BeanFactory添加一个忽略的接口ServletContextAware。
+* 方法registerWebApplicationScopes：注册和Web应用Scope相关的对象。
+
+```java
+public static void registerWebApplicationScopes(ConfigurableListableBeanFactory beanFactory, ServletContext sc) {
+		beanFactory.registerScope(WebApplicationContext.SCOPE_REQUEST, new RequestScope());
+		beanFactory.registerScope(WebApplicationContext.SCOPE_SESSION, new SessionScope(false));
+		beanFactory.registerScope(WebApplicationContext.SCOPE_GLOBAL_SESSION, new SessionScope(true));
+		if (sc != null) {
+			ServletContextScope appScope = new ServletContextScope(sc);
+			beanFactory.registerScope(WebApplicationContext.SCOPE_APPLICATION, appScope);
+			// Register as ServletContext attribute, for ContextCleanupListener to detect it.
+			sc.setAttribute(ServletContextScope.class.getName(), appScope);
+		}
+
+		beanFactory.registerResolvableDependency(ServletRequest.class, new RequestObjectFactory());
+		beanFactory.registerResolvableDependency(ServletResponse.class, new ResponseObjectFactory());
+		beanFactory.registerResolvableDependency(HttpSession.class, new SessionObjectFactory());
+		beanFactory.registerResolvableDependency(WebRequest.class, new WebRequestObjectFactory());
+		if (jsfPresent) {
+			FacesDependencyRegistrar.registerFacesDependencies(beanFactory);
+		}
+	}
+```
+
+beanFactory#registerScope把Scope的实例注册并且存放在AbstractBeanFactory的一个属性名为scopes的LinkedHashMap里面，同时通过beanFactory#registerResolvableDependency注册几个基于ObjectFactory实例获取的接口的实例。#registerResolvableDependency的作用是注册那些依赖ObjectFactory 注入接口实例的对象，如果有疑问可以看下上面的几个类RequestObjectFactory、ResponseObjectFactory等等的用法。
+
+* registerEnvironmentBeans方法主要是注册和Web应用上下文环境相关的单例Bean:
+
+```java
+public static void registerEnvironmentBeans(
+			ConfigurableListableBeanFactory bf, ServletContext servletContext, ServletConfig servletConfig) {
+
+		if (servletContext != null && !bf.containsBean(WebApplicationContext.SERVLET_CONTEXT_BEAN_NAME)) {
+			bf.registerSingleton(WebApplicationContext.SERVLET_CONTEXT_BEAN_NAME, servletContext);
+		}
+
+		if (servletConfig != null && !bf.containsBean(ConfigurableWebApplicationContext.SERVLET_CONFIG_BEAN_NAME)) {
+			bf.registerSingleton(ConfigurableWebApplicationContext.SERVLET_CONFIG_BEAN_NAME, servletConfig);
+		}
+
+		if (!bf.containsBean(WebApplicationContext.CONTEXT_PARAMETERS_BEAN_NAME)) {
+			Map<String, String> parameterMap = new HashMap<String, String>();
+			if (servletContext != null) {
+				Enumeration<?> paramNameEnum = servletContext.getInitParameterNames();
+				while (paramNameEnum.hasMoreElements()) {
+					String paramName = (String) paramNameEnum.nextElement();
+					parameterMap.put(paramName, servletContext.getInitParameter(paramName));
+				}
+			}
+			if (servletConfig != null) {
+				Enumeration<?> paramNameEnum = servletConfig.getInitParameterNames();
+				while (paramNameEnum.hasMoreElements()) {
+					String paramName = (String) paramNameEnum.nextElement();
+					parameterMap.put(paramName, servletConfig.getInitParameter(paramName));
+				}
+			}
+			bf.registerSingleton(WebApplicationContext.CONTEXT_PARAMETERS_BEAN_NAME,
+					Collections.unmodifiableMap(parameterMap));
+		}
+
+		if (!bf.containsBean(WebApplicationContext.CONTEXT_ATTRIBUTES_BEAN_NAME)) {
+			Map<String, Object> attributeMap = new HashMap<String, Object>();
+			if (servletContext != null) {
+				Enumeration<?> attrNameEnum = servletContext.getAttributeNames();
+				while (attrNameEnum.hasMoreElements()) {
+					String attrName = (String) attrNameEnum.nextElement();
+					attributeMap.put(attrName, servletContext.getAttribute(attrName));
+				}
+			}
+			bf.registerSingleton(WebApplicationContext.CONTEXT_ATTRIBUTES_BEAN_NAME,
+					Collections.unmodifiableMap(attributeMap));
+		}
+	}
+```
+
+这几个Bean的命名存放在WebApplicationContext接口的常量，实际上这些对象大多是集合类对象，注册操作有点类似Environment的实例注册。
+
+### invokeBeanFactoryPostProcessors
+
+AbstractApplicationContext#invokeBeanFactoryPostProcessors，实现和处理内建的BeanFactoryPostProcessor接口的实例。一般，我们要获取指定的ClassPath下的所有类，必须要扫描指定包下面的所有类，而扫描指定包下的所有类这个动作是由AbstractApplicationContext#invokeBeanFactoryPostProcessors的深层调用链触发的，因此这个步骤在整个上下文刷新的操作中是十分重要的。
+
+```java
+protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+		PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors());
+
+		// Detect a LoadTimeWeaver and prepare for weaving, if found in the meantime
+		// (e.g. through an @Bean method registered by ConfigurationClassPostProcessor)
+		if (beanFactory.getTempClassLoader() == null && beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
+			beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
+			beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));
+		}
+}
+```
+
+核心处理逻辑委托给PostProcessorRegistrationDelegate，这个类作用就是PostProcessor的注册，是一个委托(实际上Java里面不存在委托，委托也并不是设计模式，Spring里面使用的是"委托"的语义，而且多处用到)工具类。这个类主要处理两类PostProcessor接口的实例：BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor。首先要了解BeanDefinitionRegistryPostProcessor这个接口的实例可以实现传递形式的注册，举个例子，A、B同时实现了BeanDefinitionRegistryPostProcessor，A被激活，执行BeanDefinitionRegistryPostProcessor的目标方法的时候可以把B进行注册，然后一直传递下去。
 
 
 
-未完待续.....[]()
+
+
+未完待续.....
 
