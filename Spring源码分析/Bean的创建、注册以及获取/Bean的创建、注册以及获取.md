@@ -280,13 +280,15 @@ AbstractApplicationContext#prepareRefresh：刷新上下文前的准备方法，
 
 * 方法前面三行分别是记录启动时间戳，把closed设置为false，把active设置为true。
 
-* initPropertySources：初始化资源属性源，主要是构造ConfigurableEnvironment的实例StandardEnvironment，同时如果构造的ConfigurableEnvironment是ConfigurableWebEnvironment的实例，将会使用servletContext初始化资源属性源，详见StandardServletEnvironment#initPropertySources。
+* initPropertySources：初始化资源属性源，主要是如果上下文中的Environment实例为Null的时候(**实际上肯定不会为Null，因为Environment实例已经在方法SpringApplication#prepareEnvironment中被创建，创建完成同时会把命令行参数和Profile参数添加进去MutablePropertySources**)构造ConfigurableEnvironment的实例StandardEnvironment，同时如果构造的ConfigurableEnvironment是ConfigurableWebEnvironment的实例，将会使用servletContext初始化资源属性源，详见StandardServletEnvironment#initPropertySources。
 
 * validateRequiredProperties：校验必须的资源属性值，此方法最后委托给AbstractPropertyResolver#
 
   validateRequiredProperties，主要做requiredProperties的非空校验。
 
 * 构建一个名为earlyApplicationEvents，元素类型为ApplicationEvent的LinkedHashSet，作用见它的注释描述：构造一个早期的ApplicationEvent集合用于**multicaster**(广播器)被激活时ApplicationEvent发布。
+
+PS:实际上在Debug过程发现#initPropertySources和#validateRequiredProperties其实没有做任何事情。
 
 ### obtainFreshBeanFactory
 
@@ -514,9 +516,264 @@ protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory b
 
 核心处理逻辑委托给PostProcessorRegistrationDelegate，这个类作用就是PostProcessor的注册，是一个委托(实际上Java里面不存在委托，委托也并不是设计模式，Spring里面使用的是"委托"的语义，而且多处用到)工具类。这个类主要处理两类PostProcessor接口的实例：BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor。首先要了解BeanDefinitionRegistryPostProcessor这个接口的实例可以实现传递形式的注册，举个例子，A、B同时实现了BeanDefinitionRegistryPostProcessor，A被激活，执行BeanDefinitionRegistryPostProcessor的目标方法的时候可以把B进行注册，然后一直传递下去。
 
+讲解这个方法之前还要补充一个前面提到但是没有深入探讨的重点：
+
+SpringApplication#createApplicationContext创建ApplicationContext时(实际上是创建**AnnotationConfigWebApplicationContext**或者**AnnotationConfigEmbeddedWebApplicationContext**)的时候，都会以构造方式或者getter方式创建一个**AnnotatedBeanDefinitionReader**实例和一个**ClassPathBeanDefinitionScanner**，其中ClassPathBeanDefinitionScanner就是Bean定义的扫描器，用于扫描ClassPath中的主要是符合内部注册的注解的BeanDefinition生成一个Set&lt;BeanDefinitionHolder&gt;；而AnnotatedBeanDefinitionReader的实例化做了一件极度重要的事：
+
+调用了AnnotationConfigUtils#registerAnnotationConfigProcessors(BeanDefinitionRegistry registry,Object source)，下面看下这个方法做了什么:
+
+```java
+public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
+			BeanDefinitionRegistry registry, Object source) {
+
+		DefaultListableBeanFactory beanFactory = unwrapDefaultListableBeanFactory(registry);
+		if (beanFactory != null) {
+			if (!(beanFactory.getDependencyComparator() instanceof AnnotationAwareOrderComparator)) {
+				beanFactory.setDependencyComparator(AnnotationAwareOrderComparator.INSTANCE);
+			}
+			if (!(beanFactory.getAutowireCandidateResolver() instanceof ContextAnnotationAutowireCandidateResolver)) {
+				beanFactory.setAutowireCandidateResolver(new ContextAnnotationAutowireCandidateResolver());
+			}
+		}
+
+		Set<BeanDefinitionHolder> beanDefs = new LinkedHashSet<BeanDefinitionHolder>(4);
+
+		if (!registry.containsBeanDefinition(CONFIGURATION_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(ConfigurationClassPostProcessor.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, CONFIGURATION_ANNOTATION_PROCESSOR_BEAN_NAME));
+		}
+
+		if (!registry.containsBeanDefinition(AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(AutowiredAnnotationBeanPostProcessor.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME));
+		}
+
+		if (!registry.containsBeanDefinition(REQUIRED_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(RequiredAnnotationBeanPostProcessor.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, REQUIRED_ANNOTATION_PROCESSOR_BEAN_NAME));
+		}
+
+		// Check for JSR-250 support, and if present add the CommonAnnotationBeanPostProcessor.
+		if (jsr250Present && !registry.containsBeanDefinition(COMMON_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(CommonAnnotationBeanPostProcessor.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, COMMON_ANNOTATION_PROCESSOR_BEAN_NAME));
+		}
+
+		// Check for JPA support, and if present add the PersistenceAnnotationBeanPostProcessor.
+		if (jpaPresent && !registry.containsBeanDefinition(PERSISTENCE_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition();
+			try {
+				def.setBeanClass(ClassUtils.forName(PERSISTENCE_ANNOTATION_PROCESSOR_CLASS_NAME,
+						AnnotationConfigUtils.class.getClassLoader()));
+			}
+			catch (ClassNotFoundException ex) {
+				throw new IllegalStateException(
+						"Cannot load optional framework class: " + PERSISTENCE_ANNOTATION_PROCESSOR_CLASS_NAME, ex);
+			}
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, PERSISTENCE_ANNOTATION_PROCESSOR_BEAN_NAME));
+		}
+
+		if (!registry.containsBeanDefinition(EVENT_LISTENER_PROCESSOR_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(EventListenerMethodProcessor.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, EVENT_LISTENER_PROCESSOR_BEAN_NAME));
+		}
+		if (!registry.containsBeanDefinition(EVENT_LISTENER_FACTORY_BEAN_NAME)) {
+			RootBeanDefinition def = new RootBeanDefinition(DefaultEventListenerFactory.class);
+			def.setSource(source);
+			beanDefs.add(registerPostProcessor(registry, def, EVENT_LISTENER_FACTORY_BEAN_NAME));
+		}
+
+		return beanDefs;
+	}
+```
+
+* 设置BeanFactory的依赖比较器，如果持有的依赖比较器不是AnnotationAwareOrderComparator的实例，则设置为AnnotationAwareOrderComparator的实例。
+
+* 设置BeanFactory自动注入候选者处理器，这个处理器是ContextAnnotationAutowireCandidateResolver的实例，而ContextAnnotationAutowireCandidateResolver继承于QualifierAnnotationAutowireCandidateResolver，由名字可以看出功能，没有深入研究。
+
+* 注册ConfigurationClassPostProcessor，这个BeanDefinitionRegistryPostProcessor的实例就是用于@Configuration的Java配置类的解析，可以说，这个类就是BeanDefinition加载、解析的核心，后面将会用专门的章节解释这个PostProcessor的功能，注意它的BeanName为**org.springframework.context.annotation.internalConfigurationAnnotationProcessor**。
+
+* 注册AutowiredAnnotationBeanPostProcessor，这个BeanPostProcessor和@Autowired、@Value、@Lookup注解的自动注入(构造注入、setter注入、属性注入)功能相关，由此看来这个也是一个十分重要的类，注意它的BeanName为
+
+  **org.springframework.context.annotation.internalAutowiredAnnotationProcessor**。
+
+* 注册RequiredAnnotationBeanPostProcessor，这个BeanPostProcessor和@Required的处理逻辑相关，
+
+  注意它的BeanName为**org.springframework.context.annotation.internalRequiredAnnotationProcessor**。
+
+* 如果支持JSR-250同时BeanFactory中不存在已注册的实例，注册CommonAnnotationBeanPostProcessor，这个BeanPostProcessor主要为@PostConstruct、@PreDestroy、@Resource等注解的处理逻辑提供支持。
+
+* 如果支持JPA，注册org.springframework.orm.jpa.support.PersistenceAnnotationBeanPostProcessor。
+
+* 如果BeanFactory中不存在EventListenerMethodProcessor的Bean定义，则注册。
+
+* 如果BeanFactory中不存在DefaultEventListenerFactory的Bean定义，则注册。
+
+分析完上面的过程，现在回到PostProcessorRegistrationDelegate这个工具类的逻辑：
+
+```java
+PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors());
+```
+
+下面重点看这个比较长的方法#invokeBeanFactoryPostProcessors:
+
+```java
+public static void invokeBeanFactoryPostProcessors(
+			ConfigurableListableBeanFactory beanFactory, List<BeanFactoryPostProcessor> beanFactoryPostProcessors) {
+
+		// Invoke BeanDefinitionRegistryPostProcessors first, if any.
+		Set<String> processedBeans = new HashSet<String>();
+
+		if (beanFactory instanceof BeanDefinitionRegistry) {
+			BeanDefinitionRegistry registry = (BeanDefinitionRegistry) beanFactory;
+			List<BeanFactoryPostProcessor> regularPostProcessors = new LinkedList<BeanFactoryPostProcessor>();
+			List<BeanDefinitionRegistryPostProcessor> registryPostProcessors =
+					new LinkedList<BeanDefinitionRegistryPostProcessor>();
+
+			for (BeanFactoryPostProcessor postProcessor : beanFactoryPostProcessors) {
+				if (postProcessor instanceof BeanDefinitionRegistryPostProcessor) {
+					BeanDefinitionRegistryPostProcessor registryPostProcessor =
+							(BeanDefinitionRegistryPostProcessor) postProcessor;
+					registryPostProcessor.postProcessBeanDefinitionRegistry(registry);
+					registryPostProcessors.add(registryPostProcessor);
+				}
+				else {
+					regularPostProcessors.add(postProcessor);
+				}
+			}
+
+			// Do not initialize FactoryBeans here: We need to leave all regular beans
+			// uninitialized to let the bean factory post-processors apply to them!
+			// Separate between BeanDefinitionRegistryPostProcessors that implement
+			// PriorityOrdered, Ordered, and the rest.
+			String[] postProcessorNames =
+					beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+
+			// First, invoke the BeanDefinitionRegistryPostProcessors that implement PriorityOrdered.
+			List<BeanDefinitionRegistryPostProcessor> priorityOrderedPostProcessors = new ArrayList<BeanDefinitionRegistryPostProcessor>();
+			for (String ppName : postProcessorNames) {
+				if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+					priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					processedBeans.add(ppName);
+				}
+			}
+			sortPostProcessors(beanFactory, priorityOrderedPostProcessors);
+			registryPostProcessors.addAll(priorityOrderedPostProcessors);
+			invokeBeanDefinitionRegistryPostProcessors(priorityOrderedPostProcessors, registry);
+
+			// Next, invoke the BeanDefinitionRegistryPostProcessors that implement Ordered.
+			postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+			List<BeanDefinitionRegistryPostProcessor> orderedPostProcessors = new ArrayList<BeanDefinitionRegistryPostProcessor>();
+			for (String ppName : postProcessorNames) {
+				if (!processedBeans.contains(ppName) && beanFactory.isTypeMatch(ppName, Ordered.class)) {
+					orderedPostProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					processedBeans.add(ppName);
+				}
+			}
+			sortPostProcessors(beanFactory, orderedPostProcessors);
+			registryPostProcessors.addAll(orderedPostProcessors);
+			invokeBeanDefinitionRegistryPostProcessors(orderedPostProcessors, registry);
+
+			// Finally, invoke all other BeanDefinitionRegistryPostProcessors until no further ones appear.
+			boolean reiterate = true;
+			while (reiterate) {
+				reiterate = false;
+				postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+				for (String ppName : postProcessorNames) {
+					if (!processedBeans.contains(ppName)) {
+						BeanDefinitionRegistryPostProcessor pp = beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class);
+						registryPostProcessors.add(pp);
+						processedBeans.add(ppName);
+						pp.postProcessBeanDefinitionRegistry(registry);
+						reiterate = true;
+					}
+				}
+			}
+
+			// Now, invoke the postProcessBeanFactory callback of all processors handled so far.
+			invokeBeanFactoryPostProcessors(registryPostProcessors, beanFactory);
+			invokeBeanFactoryPostProcessors(regularPostProcessors, beanFactory);
+		}
+
+		else {
+			// Invoke factory processors registered with the context instance.
+			invokeBeanFactoryPostProcessors(beanFactoryPostProcessors, beanFactory);
+		}
+
+		// Do not initialize FactoryBeans here: We need to leave all regular beans
+		// uninitialized to let the bean factory post-processors apply to them!
+		String[] postProcessorNames =
+				beanFactory.getBeanNamesForType(BeanFactoryPostProcessor.class, true, false);
+
+		// Separate between BeanFactoryPostProcessors that implement PriorityOrdered,
+		// Ordered, and the rest.
+		List<BeanFactoryPostProcessor> priorityOrderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		List<String> orderedPostProcessorNames = new ArrayList<String>();
+		List<String> nonOrderedPostProcessorNames = new ArrayList<String>();
+		for (String ppName : postProcessorNames) {
+			if (processedBeans.contains(ppName)) {
+				// skip - already processed in first phase above
+			}
+			else if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+				priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanFactoryPostProcessor.class));
+			}
+			else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+				orderedPostProcessorNames.add(ppName);
+			}
+			else {
+				nonOrderedPostProcessorNames.add(ppName);
+			}
+		}
+
+		// First, invoke the BeanFactoryPostProcessors that implement PriorityOrdered.
+		sortPostProcessors(beanFactory, priorityOrderedPostProcessors);
+		invokeBeanFactoryPostProcessors(priorityOrderedPostProcessors, beanFactory);
+
+		// Next, invoke the BeanFactoryPostProcessors that implement Ordered.
+		List<BeanFactoryPostProcessor> orderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		for (String postProcessorName : orderedPostProcessorNames) {
+			orderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+		}
+		sortPostProcessors(beanFactory, orderedPostProcessors);
+		invokeBeanFactoryPostProcessors(orderedPostProcessors, beanFactory);
+
+		// Finally, invoke all other BeanFactoryPostProcessors.
+		List<BeanFactoryPostProcessor> nonOrderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		for (String postProcessorName : nonOrderedPostProcessorNames) {
+			nonOrderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+		}
+		invokeBeanFactoryPostProcessors(nonOrderedPostProcessors, beanFactory);
+
+		// Clear cached merged bean definitions since the post-processors might have
+		// modified the original metadata, e.g. replacing placeholders in values...
+		beanFactory.clearMetadataCache();
+	}
+```
+
+PostProcessorRegistrationDelegate的invokeBeanFactoryPostProcessors中的List&lt;BeanFactoryPostProcessor&gt; beanFactoryPostProcessors默认有三个内建的BeanFactoryPostProcessor，通过DEBUG可以追踪到通过AbstractApplicationContext#addBeanFactoryPostProcessor添加，添加的来源分别是：
+
+ConfigFileApplicationListener#addPostProcessors，添加PropertySourceOrderingPostProcessor。
+ConfigurationWarningsApplicationContextInitializer#initialize，添加ConfigurationWarningsPostProcessor。
+SharedMetadataReaderFactoryContextInitializer#initialize，添加CachingMetadataReaderFactoryPostProcessor。
+
+* 创建一个命名为processedBeans的HashSet用于过滤下面步骤获取到beanFactory中对应接口的Bean。
 
 
-
+* 当入参beanFactory是BeanDefinitionRegistry的实现，一般是DefaultListableBeanFactory，将会走if分支，而非BeanDefinitionRegistry实现，则直接调用#invokeBeanFactoryPostProcessors。
+* 进入if分支，先遍历传进来的三个PostProcessor，其中BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor分开存放，BeanFactoryPostProcessor放在**regularPostProcessors**这个LinkedList中，BeanDefinitionRegistryPostProcessor放在**registryPostProcessors**这个LinkedList中，在添加BeanDefinitionRegistryPostProcessor提前调用了其**#postProcessBeanDefinitionRegistry**。
+* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**PriorityOrdered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。
+* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**Ordered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。
+* beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，通过processedBeans校对是否有漏网之鱼，如果遗漏了，命中的实例BeanName放进去**processedBeans**，把实例添加到**registryPostProcessors**，调用其**#postProcessBeanDefinitionRegistry**。
+* 通过#invokeBeanFactoryPostProcessors遍历调用**registryPostProcessors**中所有实例的**#postProcessBeanFactory**。
+* 通过#invokeBeanFactoryPostProcessors遍历调用**regularPostProcessors**中所有实例的**#postProcessBeanFactory**。
+* 获取beanFactory中已注册的BeanFactoryPostProcessor接口的所有实例，通过**processedBeans**过滤掉已经处理过的Bean，把遗漏的重新又再划分成三种实现了PriorityOrdered、实现了Ordered、没有排序的，前两种获取到的实例集合需要进行排序，如果需要排序，排序完后遍历所有实例分别通过#invokeBeanFactoryPostProcessors调用#postProcessBeanFactory。
+* 调用beanFactory#clearMetadataCache，清理缓存。
 
 未完待续.....
 
