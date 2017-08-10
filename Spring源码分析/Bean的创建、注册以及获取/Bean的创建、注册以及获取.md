@@ -615,6 +615,8 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
 
 * 如果BeanFactory中不存在DefaultEventListenerFactory的Bean定义，则注册。
 
+**PS:明确上边注册这一堆的PostProcessor中，只有ConfigurationClassPostProcessor是BeanDefinitionRegistryPostProcessor的实现，其他的都是BeanPostProcessor。**
+
 分析完上面的过程，现在回到PostProcessorRegistrationDelegate这个工具类的逻辑：
 
 ```java
@@ -767,13 +769,153 @@ SharedMetadataReaderFactoryContextInitializer#initialize，添加CachingMetadata
 
 * 当入参beanFactory是BeanDefinitionRegistry的实现，一般是DefaultListableBeanFactory，将会走if分支，而非BeanDefinitionRegistry实现，则直接调用#invokeBeanFactoryPostProcessors。
 * 进入if分支，先遍历传进来的三个PostProcessor，其中BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor分开存放，BeanFactoryPostProcessor放在**regularPostProcessors**这个LinkedList中，BeanDefinitionRegistryPostProcessor放在**registryPostProcessors**这个LinkedList中，在添加BeanDefinitionRegistryPostProcessor提前调用了其**#postProcessBeanDefinitionRegistry**。
-* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**PriorityOrdered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。
-* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**Ordered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。
-* beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，通过processedBeans校对是否有漏网之鱼，如果遗漏了，命中的实例BeanName放进去**processedBeans**，把实例添加到**registryPostProcessors**，调用其**#postProcessBeanDefinitionRegistry**。
+* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**PriorityOrdered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。     **[(1) ---- 这里标记一下:第一次调用所有BeanDefinitionRegistryPostProcessor接口的所有Bean实例的#postProcessBeanDefinitionRegistry]**
+* 获取beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，过滤出所有实现了**Ordered**接口的目标实例集合，过滤过程中命中的实例BeanName放进去**processedBeans**，把这些实例添加到**registryPostProcessors**，排序后遍历目标实例集合中所有实例调用其**#postProcessBeanDefinitionRegistry**。  **[(2) ---- 这里标记一下:第二次调用所有BeanDefinitionRegistryPostProcessor接口的所有Bean实例的#postProcessBeanDefinitionRegistry]**
+* beanFactory中已注册的BeanDefinitionRegistryPostProcessor接口的所有实例，通过processedBeans校对是否有漏网之鱼，如果遗漏了(**主要是没有实现排序接口的实现**)，命中的实例BeanName放进去**processedBeans**，把实例添加到**registryPostProcessors**，调用其**#postProcessBeanDefinitionRegistry**。  **[(3) ---- 这里标记一下:第三次调用所有BeanDefinitionRegistryPostProcessor接口的所有Bean实例的#postProcessBeanDefinitionRegistry]**
 * 通过#invokeBeanFactoryPostProcessors遍历调用**registryPostProcessors**中所有实例的**#postProcessBeanFactory**。
 * 通过#invokeBeanFactoryPostProcessors遍历调用**regularPostProcessors**中所有实例的**#postProcessBeanFactory**。
 * 获取beanFactory中已注册的BeanFactoryPostProcessor接口的所有实例，通过**processedBeans**过滤掉已经处理过的Bean，把遗漏的重新又再划分成三种实现了PriorityOrdered、实现了Ordered、没有排序的，前两种获取到的实例集合需要进行排序，如果需要排序，排序完后遍历所有实例分别通过#invokeBeanFactoryPostProcessors调用#postProcessBeanFactory。
 * 调用beanFactory#clearMetadataCache，清理缓存。
+
+**PS:这里得出如下的规律:**
+
+* (1)内建的postProcessBeanDefinitionRegistry先于外部实现的postProcessBeanDefinitionRegistry执行。
+* (2)postProcessBeanDefinitionRegistry先于postProcessBeanFactory执行。
+* (3)上面分析有三处标记，第一处标记命中的BeanDefinitionRegistryPostProcessor的实例有且仅有**ConfigurationClassPostProcessor**这个Bean(**这些实例必须同时实现PriorityOrdered和BeanDefinitionRegistryPostProcessor两个接口**)，ConfigurationClassPostProcessor执行完#postProcessBeanDefinitionRegistry，使得所有编程式配置的Bean都注册完毕，这个时候执行第二处标记处的获取所有BeanDefinitionRegistryPostProcessor的实例就能获取到外部自定义的所有的BeanDefinitionRegistryPostProcessor实例(**这些实例必须同时实现Ordered和BeanDefinitionRegistryPostProcessor两个接口**)并且调用其#postProcessBeanDefinitionRegistry，然后的第三处标记主要是遗漏的检查，获取所有没有实现排序接口的BeanDefinitionRegistryPostProcessor实例调用其postProcessBeanDefinitionRegistry(**一般来说外部自定义的BeanDefinitionRegistryPostProcessor[没有实现排序接口]就是在第三处标记的时候执行#postProcessBeanDefinitionRegistry**，最常见的如Mybatis中的MapperScannerConfigurer)。
+* (4)所有的BeanDefinitionRegistryPostProcessor实例都处理完毕后，接着处理BeanFactoryPostProcessor的实例，处理过程和(3)一致。
+
+到此，PostProcessorRegistrationDelegate#invokeBeanFactoryPostProcessors方法已经分析完毕，接下来就必须分析命中第一处标记的**ConfigurationClassPostProcessor**执行#postProcessBeanDefinitionRegistry到底做了什么事情。
+
+### [重点]Spring编程式配置解析的核心--ConfigurationClassPostProcessor
+
+ConfigurationClassPostProcessor在Spring中主要负责所有@Configuration配置类的解析工作，这里首先要明确一点，Spring扫描Bean组件的识别注解是@Component，常见的注解如@Configuration、@Service、@Repository、@Controller、@ControllerAdive等注解里面都带有@Component注解，其实@Component也是可以单独使用的。ConfigurationClassPostProcessor是一个BeanDefinitionRegistryPostProcessor的实例，那么它的核心逻辑就在#postProcessBeanDefinitionRegistry和#postProcessBeanFactory。
+
+先看ConfigurationClassPostProcessor#postProcessBeanDefinitionRegistry:
+
+```java
+public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+		int registryId = System.identityHashCode(registry);
+		if (this.registriesPostProcessed.contains(registryId)) {
+			throw new IllegalStateException(
+					"postProcessBeanDefinitionRegistry already called on this post-processor against " + registry);
+		}
+		if (this.factoriesPostProcessed.contains(registryId)) {
+			throw new IllegalStateException(
+					"postProcessBeanFactory already called on this post-processor against " + registry);
+		}
+		this.registriesPostProcessed.add(registryId);
+
+		processConfigBeanDefinitions(registry);
+	}
+```
+
+* 先通过BeanDefinitionRegistry实例生成identityHashCode，用来判断是否重复执行#postProcessBeanDefinitionRegistry或者#postProcessBeanFactory，如果重复执行了直接抛出异常，如果没有则把identityHashCode添加进去registriesPostProcessed这个HashSet中。
+
+进入ConfigurationClassPostProcessor#processConfigBeanDefinitions，这个方法比较长，下面一步一步分析:
+
+```java
+public void processConfigBeanDefinitions(BeanDefinitionRegistry registry) {
+		List<BeanDefinitionHolder> configCandidates = new ArrayList<BeanDefinitionHolder>();
+		String[] candidateNames = registry.getBeanDefinitionNames();
+
+		for (String beanName : candidateNames) {
+			BeanDefinition beanDef = registry.getBeanDefinition(beanName);
+			if (ConfigurationClassUtils.isFullConfigurationClass(beanDef) ||
+					ConfigurationClassUtils.isLiteConfigurationClass(beanDef)) {
+				if (logger.isDebugEnabled()) {
+					logger.debug("Bean definition has already been processed as a configuration class: " + beanDef);
+				}
+			}
+			else if (ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)) {
+				configCandidates.add(new BeanDefinitionHolder(beanDef, beanName));
+			}
+		}
+
+		// Return immediately if no @Configuration classes were found
+		if (configCandidates.isEmpty()) {
+			return;
+		}
+
+		// Sort by previously determined @Order value, if applicable
+		Collections.sort(configCandidates, new Comparator<BeanDefinitionHolder>() {
+			@Override
+			public int compare(BeanDefinitionHolder bd1, BeanDefinitionHolder bd2) {
+				int i1 = ConfigurationClassUtils.getOrder(bd1.getBeanDefinition());
+				int i2 = ConfigurationClassUtils.getOrder(bd2.getBeanDefinition());
+				return (i1 < i2) ? -1 : (i1 > i2) ? 1 : 0;
+			}
+		});
+
+		// Detect any custom bean name generation strategy supplied through the enclosing application context
+		SingletonBeanRegistry sbr = null;
+		if (registry instanceof SingletonBeanRegistry) {
+			sbr = (SingletonBeanRegistry) registry;
+			if (!this.localBeanNameGeneratorSet && sbr.containsSingleton(CONFIGURATION_BEAN_NAME_GENERATOR)) {
+				BeanNameGenerator generator = (BeanNameGenerator) sbr.getSingleton(CONFIGURATION_BEAN_NAME_GENERATOR);
+				this.componentScanBeanNameGenerator = generator;
+				this.importBeanNameGenerator = generator;
+			}
+		}
+
+		// Parse each @Configuration class
+		ConfigurationClassParser parser = new ConfigurationClassParser(
+				this.metadataReaderFactory, this.problemReporter, this.environment,
+				this.resourceLoader, this.componentScanBeanNameGenerator, registry);
+
+		Set<BeanDefinitionHolder> candidates = new LinkedHashSet<BeanDefinitionHolder>(configCandidates);
+		Set<ConfigurationClass> alreadyParsed = new HashSet<ConfigurationClass>(configCandidates.size());
+		do {
+			parser.parse(candidates);
+			parser.validate();
+
+			Set<ConfigurationClass> configClasses = new LinkedHashSet<ConfigurationClass>(parser.getConfigurationClasses());
+			configClasses.removeAll(alreadyParsed);
+
+			// Read the model and create bean definitions based on its content
+			if (this.reader == null) {
+				this.reader = new ConfigurationClassBeanDefinitionReader(
+						registry, this.sourceExtractor, this.resourceLoader, this.environment,
+						this.importBeanNameGenerator, parser.getImportRegistry());
+			}
+			this.reader.loadBeanDefinitions(configClasses);
+			alreadyParsed.addAll(configClasses);
+
+			candidates.clear();
+			if (registry.getBeanDefinitionCount() > candidateNames.length) {
+				String[] newCandidateNames = registry.getBeanDefinitionNames();
+				Set<String> oldCandidateNames = new HashSet<String>(Arrays.asList(candidateNames));
+				Set<String> alreadyParsedClasses = new HashSet<String>();
+				for (ConfigurationClass configurationClass : alreadyParsed) {
+					alreadyParsedClasses.add(configurationClass.getMetadata().getClassName());
+				}
+				for (String candidateName : newCandidateNames) {
+					if (!oldCandidateNames.contains(candidateName)) {
+						BeanDefinition bd = registry.getBeanDefinition(candidateName);
+						if (ConfigurationClassUtils.checkConfigurationClassCandidate(bd, this.metadataReaderFactory) &&
+								!alreadyParsedClasses.contains(bd.getBeanClassName())) {
+							candidates.add(new BeanDefinitionHolder(bd, candidateName));
+						}
+					}
+				}
+				candidateNames = newCandidateNames;
+			}
+		}
+		while (!candidates.isEmpty());
+
+		// Register the ImportRegistry as a bean in order to support ImportAware @Configuration classes
+		if (sbr != null) {
+			if (!sbr.containsSingleton(IMPORT_REGISTRY_BEAN_NAME)) {
+				sbr.registerSingleton(IMPORT_REGISTRY_BEAN_NAME, parser.getImportRegistry());
+			}
+		}
+
+		if (this.metadataReaderFactory instanceof CachingMetadataReaderFactory) {
+			((CachingMetadataReaderFactory) this.metadataReaderFactory).clearCache();
+		}
+	}
+```
+
+* 建立一个命名为configCandidates目标类型为BeanDefinitionHolder的ArrayList，用于存放将会被解析的目标类(带有@Configuration)，先从BeanDefinitionRegistry实例(DefaultConfigurableBeanFactory)中获取所有已经注册的Bean，通过ConfigurationClassUtils#isFullConfigurationClass和ConfigurationClassUtils#isLiteConfigurationClass判断是否Configuration类
 
 未完待续.....
 
