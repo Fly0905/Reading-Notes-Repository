@@ -305,7 +305,7 @@ AbstractApplicationContext#obtainFreshBeanFactory（**这个方法十分重要**
 	}
 ```
 
-首先我们一定要关注一个十分主要的类**GenericApplicationContext**，这个类的空入参构造就是生成一个新的**DefaultListableBeanFactory**，熟悉Spring体系的人必然知道DefaultListableBeanFactory这个类的重要性，obtainFreshBeanFactory方法如下，里面的#refreshBeanFactory和#getBeanFactory都是由GenericApplicationContext实现，refreshBeanFactory主要是把GenericApplicationContext中的#refreshBeanFactory通过cas设置为true，并且为DefaultListableBeanFactory设置serializationId，#getBeanFactory就是返回新建的DefaultListableBeanFactory实例。
+首先我们一定要关注一个十分重要的类**GenericApplicationContext**，这个类的空入参构造就是生成一个新的**DefaultListableBeanFactory**，熟悉Spring体系的人必然知道DefaultListableBeanFactory这个类的重要性，obtainFreshBeanFactory方法如下，里面的#refreshBeanFactory和#getBeanFactory都是由GenericApplicationContext实现，refreshBeanFactory主要是把GenericApplicationContext中的#refreshBeanFactory使用cas把refreshed属性设置为true，并且为DefaultListableBeanFactory设置serializationId，#getBeanFactory就是返回新建的DefaultListableBeanFactory实例。
 
 那么这里有一个比较大的疑惑，GenericApplicationContext的实例是什么时候创建的？答案见SpringBootServletInitializer的#createRootApplicationContext：
 
@@ -2071,13 +2071,14 @@ public void preInstantiateSingletons() throws BeansException {
 
 **PS：（1）从根本上看，Spring中所有的Bean都是Lazy实例化的，非延时实例化的Bean是通过AbstractBeanFactory#getBean提前进行实例化的。**
 
-**（2）FactoryBean接口的实现Bean实例化时先实例化FactoryBean本身，如果同时为SmartFactoryBean接口的实例，SmartFactoryBean#isEagerInit为true，FactoryBean#isSingleton也为true，那么FactoryBean的"产品Bean"也会进行实例化 。**
+**（2）FactoryBean接口的实现Bean实例化时先实例化FactoryBean本身，如果同时为SmartFactoryBean接口的实例，SmartFactoryBean#isEagerInit为true，FactoryBean#isSingleton也为true，那么FactoryBean的"单例产品Bean"也会进行实例化 。**
 
 ### finishRefresh
 
 这个方法是刷新Spring容器上下文的最后一个步骤，代码注释是：发布通讯事件。其实还做了其他东西，见源码:
 
 ```java
+//AbstractApplicationContext中
 protected void finishRefresh() {
 	// Initialize lifecycle processor for this context.
 	initLifecycleProcessor();
@@ -2091,12 +2092,22 @@ protected void finishRefresh() {
 	// Participate in LiveBeansView MBean, if active.
 	LiveBeansView.registerApplicationContext(this);
 }
+
+//EmbeddedWebApplicationContext中
+protected void finishRefresh() {
+	super.finishRefresh();
+	EmbeddedServletContainer localContainer = startEmbeddedServletContainer();
+	if (localContainer != null) {
+	  publishEvent(new EmbeddedServletContainerInitializedEvent(this, localContainer));
+	}
+}
 ```
 
 * 初始化LifecycleProcessor实例，实际上是注册其实现DefaultLifecycleProcessor类作为一个单例。
 * 获取上面步骤注册的DefaultLifecycleProcessor，调用其#onRefresh，这个方法会触发DefaultLifecycleProcessor#startBeans和DefaultLifecycleProcessor#doStart，最后触发满足相应条件的Lifecycle实例的#start(如果没有记错，Spring-Amqp的监听者容器就是通过这个方式启动的)。
 * 发布ContextRefreshedEvent。
 * LiveBeansView注册当前上下文，这个和MBean相关，用于监控容器上下文。
+* 然后执行子类EmbeddedWebApplicationContext中#finishRefresh，启动嵌入式Servlet容器，同时发布EmbeddedServletContainerInitializedEvent。(如果你用的是嵌入式Tomcat，执行到这一步就能看到tomcat的启动完成日志)。
 
 另外，如果上面的所有方法一旦出现异常，会调用AbstractApplicationContext#destroyBeans去销毁所有单例，调用AbstractApplicationContext#cancelRefresh取消刷新操作，最后还有一个finally块的AbstractApplicationContext#resetCommonCaches用于清理缓存。
 
