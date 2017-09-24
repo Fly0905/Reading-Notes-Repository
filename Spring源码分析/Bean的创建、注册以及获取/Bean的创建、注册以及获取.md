@@ -862,11 +862,30 @@ public void processConfigBeanDefinitions(BeanDefinitionRegistry registry) {
 
 这里有必要详细讲解一下ConfigurationClassUtils里面几个工具类的判断规则：
 
-* ConfigurationClassUtils#checkConfigurationClassCandidate，判断目标Bean定义的接口类型，获取其元注解信息，通过#isFullConfigurationCandidate(是否使用了@Configuration注解)判断是否**"full"**类型，如果是则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".configurationClass"，value是"full"，否则通过#isLiteConfigurationCandidate(目标Bean如果是接口返回false，如果带有注解@Component、@ComponentScan、@Import、@ImportResource或者其方法中出现@Bean，则返回true)判断是否**lite**类型，如果是则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".configurationClass"，value是"lite"，否则返回false，最后再判断是否有@Ordedr注解，有则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".order"，value是@Ordedr的value()。
-* ConfigurationClassUtils#isFullConfigurationClas就是判断Bean定义中的key为ConfigurationClassPostProcessor全类名+ ".configurationClass"的属性是否为"full"，若是则返回true，否则返回false。
+* ConfigurationClassUtils#checkConfigurationClassCandidate，判断目标Bean定义的接口类型，获取其元注解信息，通过#isFullConfigurationCandidate(**当前解析的类实例是否使用了@Configuration注解**)判断是否**"full"**类型，如果是则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".configurationClass"，value是"full"，否则通过#isLiteConfigurationCandidate(**目标Bean如果是接口返回false，如果带有注解@Component、@ComponentScan、@Import、@ImportResource或者其方法中出现@Bean，则返回true**)判断是否**lite**类型，如果是则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".configurationClass"，value是"lite"，否则返回false，最后再判断是否有@Ordedr注解，有则Bean定义中setAttribute，key是ConfigurationClassPostProcessor全类名+ ".order"，value是@Ordedr的value()。
+* ConfigurationClassUtils#isFullConfigurationClass就是判断Bean定义中的key为ConfigurationClassPostProcessor全类名+ ".configurationClass"的属性是否为"full"，若是则返回true，否则返回false。
 * ConfigurationClassUtils#isLiteConfigurationClass就是判断Bean定义中的key为ConfigurationClassPostProcessor全类名+ ".configurationClass"的属性是否为"lite"，若是则返回true，否则返回false。
 
 看起来有点简陋的做法，但是起到了很好的过滤作用。
+
+**这里需要注意一点(分析下面的代码片段)：**
+
+```java
+for (AnnotationAttributes componentScan : componentScans) {
+				// The config class is annotated with @ComponentScan -> perform the scan immediately
+				Set<BeanDefinitionHolder> scannedBeanDefinitions =
+						this.componentScanParser.parse(componentScan, sourceClass.getMetadata().getClassName());
+				// Check the set of scanned definitions for any further config classes and parse recursively if needed
+				for (BeanDefinitionHolder holder : scannedBeanDefinitions) {
+					if (ConfigurationClassUtils.checkConfigurationClassCandidate(
+							holder.getBeanDefinition(), this.metadataReaderFactory)) {
+						parse(holder.getBeanDefinition().getBeanClassName(), holder.getBeanName());
+					}
+	   }
+}
+```
+
+ ConfigurationClassUtils#checkConfigurationClassCandidate以及ConfigurationClassParser#parse是对所有的被扫描注册的Bean都有效，换句话说，**在所有@Component的类中定义@Bean来注册Bean也是可行的**，因为这样能满足ConfigurationClassUtils#checkConfigurationClassCandidate中的"lite"类型返回true然后进入了ConfigurationClassParser#parse，也就是此时@Component的类的解析过程会跟@Configuration类的解析过程大概一致，但是在执行ConfigurationClassPostProcessor#postProcessBeanFactory会执行ConfigurationClassPostProcessor#enhanceConfigurationClasses，此时，会对所有满足ConfigurationClassUtils#isFullConfigurationClass(**通过@Configuration类中@Bean注解注册的Bean，依据是Bean定义中的CONFIGURATION_CLASS_ATTRIBUTE属性为"full"**)的Bean使用CGLIB进行增强，验证这一点很简单，在@Configuration的类中多个@Bean方法打断点，如果@Bean方法之间有引用，可以看到引用的入参Bean的实例的类名后面带有"$$CGLIBxxxx"字眼。而@Component的类中通过@Bean注册的Bean不会通过CGLIB进行增强。
 
 * 经过上面的一些判断规则，一般来说(就笔者debug多次来看)，configCandidates里面只会有一个元素，这个元素就是启动类的BeanDefinitionHolder实例(主函数是什么时候注册进去BeanFactory？这个操作可以看下SpringApplication#prepareContext，这里不详细展开)，一般来说，我们使用@SpringBootApplication注解标注启动类，很明显@SpringBootApplication里面就带有了@Configuration，没错它就是一个配置类。
 * 接下去是configCandidates元素排序(实际上只有一个元素，其实排序并没有什么作用)，注册BeanNameGenerator。
@@ -966,6 +985,8 @@ public void parse(Set<BeanDefinitionHolder> configCandidates) {
 * 遍历Set&lt;BeanDefinitionHolder&gt;，按Bean定义的上游类型决定调用不同的多态parse方法，最终全部都是委托给ConfigurationClassParser#processConfigurationClass。
 * 通过#processDeferredImportSelectors处理延时加载的ImportSelector，主要是实现了DeferredImportSelector的实例，这些实例存放在命名为deferredImportSelectors的List&lt;DeferredImportSelectorHolder&gt;，在#processImports里面添加，在所有BeanDefinitionHolder中的配置类解析完毕之后统一调用。
 
+上面源码中的三个#parse方法的方法签名是不相同的，但最终都是调用#processConfigurationClass。
+
 ```java
 protected void processConfigurationClass(ConfigurationClass configClass) throws IOException {
 		if (this.conditionEvaluator.shouldSkip(configClass.getMetadata(), ConfigurationPhase.PARSE_CONFIGURATION)) {
@@ -1022,7 +1043,7 @@ protected final SourceClass doProcessConfigurationClass(ConfigurationClass confi
 	}
 ```
 
-* 第一步优先解析成员类(嵌入式的类)，成员类一般就是内部类和静态内部类：
+* 第一步优先解析成员类(**嵌入式的类**)，成员类一般就是内部类和静态内部类,解析的来源是反射调用遍历sourceClass.getDeclaredClasses(  )的每一个成员类：
 
 ```java
 private void processMemberClasses(ConfigurationClass configClass, SourceClass sourceClass) throws IOException {
@@ -1091,7 +1112,7 @@ private void processMemberClasses(ConfigurationClass configClass, SourceClass so
 		}
 ```
 
-获取目标对象上所有的@ComponentScan的AnnotationAttributes进行遍历，调用ComponentScanAnnotationParser#parse对AnnotationAttributes进行处理，里面触发了ClassPath扫描，返回扫描并且已经解析完毕的一个命名为scannedBeanDefinitions的Set&lt;BeanDefinitionHolder&gt;，同时要注意一点，被扫描和解析过的Bean都会被注册到BeanDefinitionRegistry(DefaultConfigurableBeanFactory)，然后再遍历这个scannedBeanDefinitions调用前边说到的ConfigurationClassParser#parse。那么接下来看下ComponentScanAnnotationParser#parse究竟做了什么事。
+获取目标对象上所有的@ComponentScan的AnnotationAttributes进行遍历，调用ComponentScanAnnotationParser#parse对AnnotationAttributes进行处理，**里面触发了ClassPath扫描**，返回扫描并且已经解析完毕的一个命名为scannedBeanDefinitions的Set&lt;BeanDefinitionHolder&gt;，同时要注意一点，被扫描和解析过的Bean都会被注册到BeanDefinitionRegistry(DefaultConfigurableBeanFactory)，然后再遍历这个scannedBeanDefinitions调用前边说到的ConfigurationClassParser#parse。那么接下来看下ComponentScanAnnotationParser#parse究竟做了什么事。
 
 ```java
 public Set<BeanDefinitionHolder> parse(AnnotationAttributes componentScan, final String declaringClass) {
@@ -1193,6 +1214,12 @@ protected Set<BeanDefinitionHolder> doScan(String... basePackages) {
 ```
 
 遍历basePackages数组，通过ClassPathBeanDefinitionScanner#findCandidateComponents获取basePackage，返回扫描并且初步解析的一个命名为candidates的Set&lt;BeanDefinition&gt;，实际上里面的每一个元素都是ScannedGenericBeanDefinition的实例，而ScannedGenericBeanDefinition实现了AnnotatedBeanDefinition接口，继承自AbstractBeanDefinition。接着遍历Set&lt;BeanDefinition&gt;，如果BeanDefinition继承自AbstractBeanDefinition，调用postProcessBeanDefinition，主要是设置AbstractBeanDefinition的autowireCandidate，autowireCandidate只对"By Type"类型自动注入生效，如果不设置为true，只能使用"By Name"自动注入，接着如果BeanDefinition实现了AnnotatedBeanDefinition，则调用AnnotationConfigUtils#processCommonDefinitionAnnotations，对BeanDefinition上面的其他注解进行解析，把解析值设置进去AnnotatedBeanDefinition中，这些注解有@Lazy、@Primary、@DependsOn、@Role、@Description。然后新建BeanDefinitionHolder，通过AnnotationConfigUtils#applyScopedProxyMode设置ScopedProxyMode(如果需要的话)，这个ScopedProxyMode是@ComponentScan的成员属性，如果定义为ScopedProxyMode.TARGET_CLASS，那么所有的BeanDefinitionHolder会经过ScopedProxyCreator#createScopedProxy处理，并且这些ScopedProxyMode.TARGET_CLASS的BeanDefinition会注册两次，一次是源BeanDefinition，另一次是包装为ScopedProxyFactoryBean的BeanDefinition，具体见ScopedProxyCreator#createScopedProxy。最后解析完毕的definitionHolder添加到beanDefinitions中，同时通过#registerBeanDefinition注册BeanDefinition(BeanDefinition的注册和获取等在后面的章节单独讲解)，这里的注册Bean包括BeanDefinition注册和Aliases注册，这些是委托给BeanDefinitionReaderUtils#registerBeanDefinition完成。
+
+这里有几个点需要注意的：
+
+（1）命中扫描规则注册的bean定义的类型是ScannedGenericBeanDefinition。
+
+（2）默认定义的IncludeFilter里面定义的注解是**@Component**，也就是经过扫描这一步之后，所有打了@Component注解的类都会注册到BeanFactory，打了@Component的注解有@Service、@Controller、@Repository、@ControllerAdvice、@Configuration等等，这就是外层可以通过返回的候选BeanDefinitionHolder遍历出所有@Configuration的Bean进行加工的原因。
 
 * 经过这个第三步@ComponentScan注解处理后，会发现BeanFactory中已经能获取到通过@Component注册的Bean，然后继续前面的操作，进入第四步，处理@Import注解的处理逻辑：
 
@@ -1393,7 +1420,7 @@ private void processInterfaces(ConfigurationClass configClass, SourceClass sourc
 其实就是把满足第六步，类型为接口的默认方法的方法添加到ConfigurationClass的beanMethods中。
 
 * 第八步，如果当前的sourceClass存在父类，判断是否合法，返回父类，触发外层递归，否则走到方法终结，返回null，跳出递归。跳出递归之后，别忘记了#pocessConfigurationClass中还存在一句代码`this.configurationClasses.put(configClass, configClass);`，可以知道，ConfigurationClassParser中的名为configurationClasses的LinkedHashMap&lt;ConfigurationClass, ConfigurationClass>存放了最终解析完毕的ConfigurationClass。
-* 第九步，最后执行#parse中的3processDeferredImportSelectors，有个特殊处理就是`this.deferredImportSelectors = null;`,使得不落入DeferredImportSelector的判断分支，通过importClassNames直接调用#processImports。**到此为止ConfigurationClassParser#parse的使命结束了。**
+* 第九步，最后执行#parse中的processDeferredImportSelectors，有个特殊处理就是`this.deferredImportSelectors = null;`,使得不落入DeferredImportSelector的判断分支，通过importClassNames直接调用#processImports。**到此为止ConfigurationClassParser#parse的使命结束了。**
 
 接着回到ConfigurationClassPostProcessor#processConfigBeanDefinitions，看ConfigurationClassParser的validate方法:
 
@@ -1672,7 +1699,7 @@ public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) 
 	}
 ```
 
-主要是重复执行判断，然后BeanDefinitionRegistryPostProcessor hook apparently not supported的时候，在这个方法尝试调用#processConfigBeanDefinitions，然后BeanFactory中所有的ConfigurationClass实例注册的Bean定义都会通过#enhanceConfigurationClasses，修改Bean定义的BeanClass，使用了CGLIB。
+主要是重复执行判断，然后BeanDefinitionRegistryPostProcessor hook apparently not supported的时候，在这个方法尝试调用#processConfigBeanDefinitions，然后BeanFactory中所有的ConfigurationClass实例注册的Bean定义（**因为判断规则是ConfigurationClassUtils#isFullConfigurationClass，也就是所有的@Configuration配置类中的@Bean注解注册的Bean**）都会经过#enhanceConfigurationClasses进行增强，修改Bean定义的BeanClass为经过ConfigurationClassEnhancer#enhance进行增强的代理类enhancedClass，使用了CGLIB。
 
 ```java
 public void enhanceConfigurationClasses(ConfigurableListableBeanFactory beanFactory) {
@@ -1805,7 +1832,7 @@ public static void registerBeanPostProcessors(
 * 先获取所有的BeanPostProcessor接口的Bean的BeanName字符串数组postProcessorNames。
 * BeanFactory添加一个BeanPostProcessor，是BeanPostProcessorChecker的实例。
 * 区分四种BeanPostProcessor，实现了PriorityOrdered接口的BeanPostProcessor、实现了PriorityOrdered接口的Ordered的BeanPostProcessor、没有实现排序的BeanPostProcessor、内部BeanPostProcessor(实现了MergedBeanDefinitionPostProcessor的BeanPostProcessor)，除了没有实现排序的BeanPostProcessor外，另外三种BeanPostProcessor在添加到BeanFactory之前都会进行排序，四种BeanPostProcessor都通过BeanFactory#addBeanPostProcessor添加到BeanFactory。
-* 最后添加ApplicationListenerDetector这个BeanPostProcessor，其实之前这个BeanPostProcessor印象中已经添加过，看注释是这里为了移动这个BeanPostProcessor到BeanPostProcessor链的尾部。
+* 最后添加ApplicationListenerDetector这个BeanPostProcessor，其实之前这个BeanPostProcessor印象中已经添加过，看注释是这里**为了移动这个BeanPostProcessor到BeanPostProcessor链的尾部**。
 
 ### initMessageSource
 
