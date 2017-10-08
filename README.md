@@ -11,3 +11,8 @@
 
 ### 其他
 * [Hystrix使用总结](https://github.com/zjcscut/Reading-Notes-Repository/blob/master/%E5%85%B6%E4%BB%96/Hystrix.md)
+
+### 实战
+* [单机和分布式下延迟任务的实现总结]()
+* [分布式环境下限流方案的实现]()
+* [分库分表实战]()
