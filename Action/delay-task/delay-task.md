@@ -25,6 +25,170 @@
 ### JDK延迟队列
 Java中的DelayQueue位于java.util.concurrent包下，作为单机实现，它很好的实现了延迟一段时间后触发事件的需求。由于是线程安全的它可以有多个消费者和多个生产者，从而在某些情况下可以提升性能。DelayQueue本质是封装了一个PriorityQueue，使之线程安全，加上Delay功能，也就是说，消费者线程只能在队列中的消息“过期”之后才能返回数据获取到消息，不然只能获取到null。
 之所以要用到PriorityQueue，主要是需要排序。也许后插入的消息需要比队列中的其他消息提前触发，那么这个后插入的消息就需要最先被消费者获取，这就需要排序功能。PriorityQueue内部使用最小堆来实现排序队列。队首的，最先被消费者拿到的就是排序系数最小的那个。使用最小堆让队列在数据量较大的时候比较有优势。使用最小堆来实现优先级队列主要是因为最小堆在插入和获取时，时间复杂度相对都比较好，都是O(logN)。
+#### 使用DelayQueue
+使用DelayQueue的时候，要求DelayQueue中的元素是java.util.concurrent.Delayed的子类，因此，我们需要实现java.util.concurrent.Delayed接口，覆写两个方法`getDelay()`和`compareTo()`，前者用于控制元素剩余延迟时间，后者用于元素排序。
+#### DelayQueue使用例子
+#### DelayedTask实现了Delayed接口
+```
+import java.util.concurrent.Delayed;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/10/9 23:45
+ */
+public class DelayedTask<T extends Runnable> implements Delayed {
+
+	private final T task;
+	private final long deadline;
+
+	public DelayedTask(T task, long deadline) {
+		this.task = task;
+		this.deadline = deadline;
+	}
+
+	//返回与此对象相关的剩余延迟时间，以给定的时间单位表示
+	@Override
+	public long getDelay(TimeUnit unit) {
+		return unit.convert(this.deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+	}
+
+	@Override
+	public int compareTo(Delayed other) {
+		if (other == this) // compare zero ONLY if same object
+			return 0;
+		if (other instanceof DelayedTask) {
+			DelayedTask x = (DelayedTask) other;
+			long diff = deadline - x.deadline;
+			if (diff < 0)
+				return -1;
+			else if (diff > 0)
+				return 1;
+			else
+				return 1;
+		}
+		long d = (getDelay(TimeUnit.MILLISECONDS) - other.getDelay(TimeUnit.MILLISECONDS));
+		return (d == 0) ? 0 : ((d < 0) ? -1 : 1);
+	}
+
+	public T getTask() {
+		return task;
+	}
+
+	public long getDeadline() {
+		return deadline;
+	}
+
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) return true;
+		if (o == null || getClass() != o.getClass()) return false;
+		DelayedTask<?> that = (DelayedTask<?>) o;
+		if (deadline != that.deadline) return false;
+		return task != null ? task.equals(that.task) : that.task == null;
+	}
+
+	@Override
+	public int hashCode() {
+		int result = task != null ? task.hashCode() : 0;
+		result = 31 * result + (int) (deadline ^ (deadline >>> 32));
+		return result;
+	}
+}
+```
+#### TaskQueueDaemonThread用于管理DelayQueue
+```
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.DelayQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/10/9 23:58
+ */
+public class TaskQueueDaemonThread {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(TaskQueueDaemonThread.class);
+
+	private static final Executor EXECUTOR = Executors.newFixedThreadPool(20);
+
+	private static final DelayQueue<DelayedTask> QUEUE = new DelayQueue<>();
+
+	private TaskQueueDaemonThread() {
+	}
+
+	private static class LazyHolder {
+		private static final TaskQueueDaemonThread TASK_QUEUE_DAEMON_THREAD = new TaskQueueDaemonThread();
+	}
+
+	public static TaskQueueDaemonThread getInstance() {
+		return LazyHolder.TASK_QUEUE_DAEMON_THREAD;
+	}
+
+	public void init() {
+		Thread daemonThread = new Thread(this::execute);
+		daemonThread.setDaemon(true);
+		daemonThread.setName("Task Queue Daemon Thread");
+		daemonThread.start();
+	}
+
+	private void execute() {
+		if (LOGGER.isDebugEnabled()) {
+			LOGGER.debug("Daemon thread starts...");
+		}
+		while (true) {
+			try {
+				DelayedTask task = QUEUE.take();  //一直阻塞
+				if (null != task) {
+					Runnable runnable = task.getTask();
+					if (null != runnable) {
+						EXECUTOR.execute(runnable);
+						if (LOGGER.isInfoEnabled()) {
+							LOGGER.debug("Execute task:{},current timestamp:{}", runnable, System.currentTimeMillis());
+						}
+					}
+				}
+			} catch (Exception e) {
+				LOGGER.error("Execute task failed", e);
+				break;
+			}
+		}
+	}
+
+	public void putTask(long deadline, Runnable task) {
+		DelayedTask delayedTask = new DelayedTask<>(task, deadline);
+		QUEUE.put(delayedTask);
+	}
+
+	public void removeTask(DelayedTask<Runnable> task) {
+		QUEUE.remove(task);
+	}
+
+	public static void main(String[] args) throws Exception{
+		TaskQueueDaemonThread instance = TaskQueueDaemonThread.getInstance();
+		instance.init();
+		instance.putTask(System.currentTimeMillis() + 5000, () -> System.out.println("延迟5000毫秒执行"));
+		instance.putTask(System.currentTimeMillis() + 6000, () -> System.out.println("延迟6000毫秒执行"));
+
+		Thread.sleep(Integer.MAX_VALUE);
+	}
+}
+```
+#### 运行TaskQueueDaemonThread中的main函数，控制台输出如下：
+```
+00:16:13.133 [Task Queue Daemon Thread] DEBUG org.throwable.TaskQueueDaemonThread - Daemon thread starts...
+延迟5000毫秒执行
+00:16:18.114 [Task Queue Daemon Thread] DEBUG org.throwable.TaskQueueDaemonThread - Execute task:org.throwable.TaskQueueDaemonThread$$Lambda$2/410424423@4334ea6b,current timestamp:1507565778114
+00:16:19.116 [Task Queue Daemon Thread] DEBUG org.throwable.TaskQueueDaemonThread - Execute task:org.throwable.TaskQueueDaemonThread$$Lambda$3/1323468230@50bfb93d,current timestamp:1507565779116
+延迟6000毫秒执行
+```
 ### ScheduledThreadPoolExecutor
 
 ### 时间轮
