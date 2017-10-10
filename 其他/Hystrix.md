@@ -25,6 +25,7 @@ Hystrix使用命令模式(Command)包装依赖调用逻辑，每个命令在单�
 依赖调用结果分：成功，失败（抛出异常），超时，线程拒绝，短路。请求失败(异常，拒绝，超时，短路)时执行fallback(降级)逻辑。
 提供熔断器组件（下一个小节详细说明）。
 提供近实时依赖的统计和监控（详细的metrics（度量）信息）。
+
 # 三、Hystrix熔断机制
 
 下面简单说明一下Hystrix的熔断机制。是否开启熔断器主要由依赖调用的错误比率决定的，依赖调用的错误比率=请求失败数/请求总数。Hystrix中断路器打开的默认请求错误比率为50%（这里暂时称为请求错误率），还有一个参数，用于设置在一个滚动窗口中，打开断路器的最少请求数（这里暂时称为滚动窗口最小请求数），这里举个具体的例子：如果滚动窗口最小请求数为20，在一个窗口内（比如10秒，统计滚动窗口的时间可以设置，见下面的参数详解），收到19个请求，即使这19个请求都失败了，此时请求错误率高达95%，但是断路器也不会打开。对于被熔断的请求，并不是永久被切断，而是被暂停一段时间（默认是5000ms）之后，允许部分请求通过，若请求都是健康的（ResponseTime<250ms）则对请求健康恢复（取消熔断），如果不是健康的，则继续熔断。（这里很容易出现一种错觉：多个请求失败但是没有触发熔断。这是因为在一个滚动窗口内的失败请求数没有达到打开断路器的最少请求数）
@@ -54,6 +55,7 @@ CommandGroup是每个命令最少配置的必选参数，在不指定ThreadPoolK
 * 实例属性：com.netflix.hystrix.HystrixCommandGroupKey
 * 实例配置：HystrixCommand.Setter().withGroupKey (HystrixCommandGroupKey.Factory.asKey("Group"));
 * 注解使用：@HystrixCommand(groupKey = "Group")
+
 #### CommandKey
 
 CommandKey是作为依赖命名，一般来说每个CommandKey代表一个依赖抽象，相同的依赖要使用相同的CommandKey名称。依赖隔离的根本就是对相同CommandKey的依赖做隔离。不同的依赖隔离最好使用不同的线程池（定义不同的ThreadPoolKey）。从HystrixCommand源码的注释也可以看到CommandKey也用于对依赖操作统计、汇总等。
@@ -61,6 +63,7 @@ CommandKey是作为依赖命名，一般来说每个CommandKey代表一个依赖
 * 实例属性：com.netflix.hystrix.HystrixCommandKey
 * 实例配置：HystrixCommand.Setter().andCommandKey(HystrixCommandKey.Factory.asKey("Key"))
 * 注解使用：@HystrixCommand(commandKey = "Key")
+
 #### ThreadPoolKey
 
 ThreadPoolKey简单来说就是依赖隔离使用的线程池的键值。当对同一业务依赖做隔离时使用CommandGroup做区分，但是对同一依赖的不同远程调用如(一个是redis 一个是http)，可以使用HystrixThreadPoolKey做隔离区分。 虽然在业务上都是相同的组，但是需要在资源上做隔离时，可以使用HystrixThreadPoolKey区分。（对于每个不同的HystrixThreadPoolKey建议使用不同的CommandKey）
@@ -71,7 +74,7 @@ ThreadPoolKey简单来说就是依赖隔离使用的线程池的键值。当对�
 
 ## 命令属性配置
 
-### (1)执行属性
+## (1)执行属性
 
 #### execution.isolation.strategy
 
@@ -87,6 +90,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.isolation.strategy
 * 实例配置： HystrixCommandProperties.Setter().withExecutionIsolationStrategy(ExecutionIsolationStrategy.THREAD)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.isolation.strategy",value = "THREAD")})
+
 #### execution.isolation.thread.timeoutInMilliseconds
 
 设置调用者等待命令执行的超时限制，超过此时间，HystrixCommand被标记为TIMEOUT，并执行回退逻辑。
@@ -98,6 +102,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.isolation.thread.timeoutInMilliseconds
 * 实例配置：HystrixCommandProperties.Setter().withExecutionTimeoutInMilliseconds(int Value);
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.isolation.thread.timeoutInMilliseconds",value = "2000")})
+
 #### execution.timeout.enabled
 
 设置HystrixCommand的执行是否有超时限制。
@@ -107,6 +112,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.timeout.enabled
 * 实例配置：HystrixCommandProperties.Setter().withExecutionTimeoutEnabled(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.timeout.enabled",value = "true")})
+
 #### execution.isolation.thread.interruptOnTimeout
 
 设置HystrixCommand的执行是否在超时发生时被中断。使用线程隔离时，是否对命令执行超时的线程调用中断（Thread.interrupt()）操作。
@@ -116,6 +122,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.isolation.thread.interruptOnTimeout
 * 实例配置：HystrixCommandProperties.Setter().withExecutionIsolationThreadInterruptOnTimeout(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.isolation.thread.interruptOnTimeout",value = "true")})
+
 #### execution.isolation.thread.interruptOnCancel
 
 当HystrixCommand命令执行发生cancel事件后是否应该响应中断。
@@ -125,6 +132,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.isolation.thread.interruptOnCancel
 * 实例配置：HystrixCommandProperties.Setter().withExecutionIsolationThreadInterruptOnCancel(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.isolation.thread.interruptOnCancel",value = "false")})
+
 #### execution.isolation.semaphore.maxConcurrentRequests
 
 设置当使用ExecutionIsolationStrategy.SEMAPHORE时，HystrixCommand执行方法允许的最大请求数。如果达到最大并发数时，后续请求会被拒绝。信号量应该是容器（比如Tomcat）线程池一小部分，不能等于或者略小于容器线程池大小，否则起不到保护作用。
@@ -134,6 +142,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.execution.isolation.semaphore.maxConcurrentRequests
 * 实例配置：HystrixCommandProperties.Setter().withExecutionIsolationSemaphoreMaxConcurrentRequests(int Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "execution.isolation.semaphore.maxConcurrentRequests",value = "10")})
+
 ## (2)回退属性
 
 下面的属性控制HystrixCommand.getFallback()执行。这些属性对ExecutionIsolationStrategy.THREAD和ExecutionIsolationStrategy.SEMAPHORE都有效。
@@ -147,6 +156,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.fallback.isolation.semaphore.maxConcurrentRequests
 * 实例配置：HystrixCommandProperties.Setter().withFallbackIsolationSemaphoreMaxConcurrentRequests(int Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "fallback.isolation.semaphore.maxConcurrentRequests",value = "10")})
+
 #### fallback.enabled
 
 该属性决定当前的调用故障或者拒绝发生时，是否调用HystrixCommand.getFallback()。
@@ -156,7 +166,8 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.fallback.enabled
 * 实例配置：HystrixCommandProperties.Setter().withFallbackEnabled(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "fallback.enabled",value = "true")})
-(3)断路器（Circuit Breaker）属性配置
+
+## (3)断路器（Circuit Breaker）属性配置
 
 #### circuitBreaker.enabled
 
@@ -167,6 +178,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.enabled
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerEnabled(boolean value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.enabled",value = "true")})
+
 #### circuitBreaker.requestVolumeThreshold
 
 设置在一个滚动窗口中，打开断路器的最少请求数。比如：如果值是20，在一个窗口内（比如10秒），收到19个请求，即使这19个请求都失败了，断路器也不会打开。(滚动窗口时间段的长度设置见下面的metrics.rollingStats.timeInMilliseconds)
@@ -176,6 +188,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.requestVolumeThreshold
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerRequestVolumeThreshold(int Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.requestVolumeThreshold",value = "20")})
+
 #### circuitBreaker.sleepWindowInMilliseconds
 
 设置在断路器被打开，拒绝请求到再次尝试请求的时间间隔。
@@ -185,6 +198,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.sleepWindowInMilliseconds
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerSleepWindowInMilliseconds(int Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.sleepWindowInMilliseconds",value = "5000")})
+
 #### circuitBreaker.errorThresholdPercentage
 
 设置打开断路器并启动回退逻辑的错误比率。（这个参数的效果受到circuitBreaker.requestVolumeThreshold和滚动时间窗口的时间长度影响）
@@ -194,6 +208,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.errorThresholdPercentage
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerErrorThresholdPercentage(int Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.errorThresholdPercentage",value = "50")})
+
 #### circuitBreaker.forceOpen
 
 如果该属性设置为true，强制断路器进入打开状态，将会拒绝所有的请求。该属性优先级比circuitBreaker.forceClosed高。
@@ -203,6 +218,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.forceOpen
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerForceOpen(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.forceOpen",value = "false")})
+
 #### circuitBreaker.forceClosed
 
 如果该属性设置为true，强制断路器进入关闭状态，将会允许所有的请求，无视错误率。
@@ -212,6 +228,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.circuitBreaker.forceClosed
 * 实例配置：HystrixCommandProperties.Setter().withCircuitBreakerForceClosed(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "circuitBreaker.forceClosed",value = "false")})
+
 ## (4)请求上下文属性配置
 
 #### requestCache.enabled
@@ -223,6 +240,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.requestCache.enabled
 * 实例配置：HystrixCommandProperties.Setter().withRequestCacheEnabled(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "requestCache.enabled",value = "true")})
+
 #### requestLog.enabled
 
 设置HystrixCommand执行和事件是否要记录日志到HystrixRequestLog。
@@ -232,6 +250,7 @@ SEMAPHORE —— 在调用线程中执行，通过信号量来限制并发量。
 * 实例属性：hystrix.command.HystrixCommandKey.requestLog.enabled
 * 实例配置：HystrixCommandProperties.Setter().withRequestLogEnabled(boolean Value)
 * 注解使用：@HystrixCommand(commandProperties = { @HystrixProperty(name = "requestLog.enabled",value = "true")})
+
 ## (5)压缩器属性配置
 
 HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一个独立的注解@HystrixCollapser。
@@ -245,6 +264,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.collapser.HystrixCollapserKey.maxRequestsInBatch
 * 实例配置：HystrixCollapserProperties.Setter().withMaxRequestsInBatch(int Value)
 * 注解使用：@HystrixCollapser(collapserProperties = { @HystrixProperty(name = "maxRequestsInBatch",value = "100")})
+
 #### timerDelayInMilliseconds
 
 设置批处理创建到执行之间的毫秒数，实际上就是这个时间间隔内发生的所有请求都会进行合并（为一个请求）。
@@ -254,6 +274,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.collapser.HystrixCollapserKey.timerDelayInMilliseconds
 * 实例配置：HystrixCollapserProperties.Setter().withTimerDelayInMilliseconds(int Value)
 * 注解使用：@HystrixCollapser(collapserProperties = { @HystrixProperty(name = "timerDelayInMilliseconds",value = "100")})
+
 #### requestCache.enabled
 
 设置请求缓存是否对HystrixCollapser.execute()和HystrixCollapser.queue()的调用起作用。（请求结果缓存需要配合HystrixRequestContext使用，具体应用可以自行查阅）
@@ -263,6 +284,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.collapser.HystrixCollapserKey.requestCache.enabled
 * 实例配置：HystrixCollapserProperties.Setter().withRequestCacheEnabled(boolean Value)
 * 注解使用：@HystrixCollapser(collapserProperties = { @HystrixProperty(name = "requestCache.enabled",value = "true")})
+
 ## (6)线程池属性配置
 
 #### coreSize
@@ -274,6 +296,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.threadpool.HystrixThreadPoolKey.coreSize
 * 实例配置：HystrixThreadPoolProperties.Setter().withCoreSize(int Value)
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "coreSize",value = "10")})
+
 #### maximumSize
 
 1.5.9新增属性，设置线程池最大值。这个是在不开始拒绝HystrixCommand的情况下支持的最大并发数。这个属性起作用的前提是设置了allowMaximumSizeToDrivergeFromCoreSize。1.5.9之前，核心线程池大小和最大线程池大小总是相同的。
@@ -283,6 +306,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.threadpool.HystrixThreadPoolKey.maximumSize
 * 实例配置：HystrixThreadPoolProperties.Setter().withMaximumSize(int Value)
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "maximumSize",value = "10")})
+
 #### maxQueueSize
 
 设置BlockingQueue最大的队列值。如果设置为-1，那么使用SynchronousQueue，否则正数将会使用LinkedBlockingQueue。如果需要去除这些限制，允许队列动态变化，可以参考queueSizeRejectionThreshold属性。 修改SynchronousQueue和LinkedBlockingQueue需要重启。
@@ -292,6 +316,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.threadpool.HystrixThreadPoolKey.maxQueueSize
 * 实例配置：HystrixThreadPoolProperties.Setter().withMaxQueueSize(int Value)
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "maxQueueSize",value = "10")})
+
 #### queueSizeRejectionThreshold
 
 设置队列拒绝的阈值----一个人为设置的拒绝访问的最大队列值，即使当前队列元素还没达到maxQueueSize。 当将一个线程放入队列等待执行时，HystrixCommand使用该属性。注意：如果maxQueueSize设置为-1，该属性不可用。
@@ -301,6 +326,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.threadpool.HystrixThreadPoolKey.queueSizeRejectionThreshold
 * 实例默认的设置：HystrixThreadPoolProperties.Setter().withQueueSizeRejectionThreshold(int Value)
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "queueSizeRejectionThreshold",value = "5")})
+
 #### keepAliveTimeMinutes
 
 设置存活时间，单位分钟。如果coreSize小于maximumSize，那么该属性控制一个线程从实用完成到被释放的时间。
@@ -310,6 +336,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 * 实例属性：hystrix.threadpool.HystrixThreadPoolKey.keepAliveTimeMinutes
 * 实例配置：HystrixThreadPoolProperties.Setter().withKeepAliveTimeMinutes(int Value)
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "keepAliveTimeMinutes",value = "1")})
+
 #### allowMaximumSizeToDivergeFromCoreSize
 
 在1.5.9中新增的属性。该属性允许maximumSize起作用。属性值可以等于或者大于coreSize值，设置coreSize小于maximumSize的线程池能够支持maximumSize的并发数，但是会将不活跃的线程返回到系统中去。（详见KeepAliveTimeMinutes） 
@@ -322,6 +349,7 @@ HystrixCollapser主要用于请求的合并，在Hystrix注解体系中它有一
 PS:不知道什么原因，计量属性的配置都是放在了线程池配置里面。可能是由于线程池隔离是计量属性隔离的基准。
 
 #### metrics.rollingStats.timeInMilliseconds
+
 设置统计的滚动窗口的时间段大小。该属性是线程池保持指标时间长短。
 * 默认值：10000（毫秒）
 * 默认属性：hystrix.threadpool.default.metrics.rollingStats.timeInMilliseconds
@@ -330,6 +358,7 @@ PS:不知道什么原因，计量属性的配置都是放在了线程池配置�
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "metrics.rollingStats.timeInMilliseconds",value = "10000")})
 
 #### metrics.rollingStats.numBuckets
+
 设置滚动的统计窗口被分成的桶（bucket）的数目。注意："metrics.rollingStats.timeInMilliseconds % metrics.rollingStats.numBuckets == 0"必须为true，否则会抛出异常。
 * 默认值：10
 * 可能的值：任何能被metrics.rollingStats.timeInMilliseconds整除的值。
@@ -339,13 +368,16 @@ PS:不知道什么原因，计量属性的配置都是放在了线程池配置�
 * 注解使用： @HystrixCommand(threadPoolProperties = {@HystrixProperty(name = "metrics.rollingStats.numBuckets",value = "10")})
 
 # 五、Hystrix基于编程式和注解使用详解
+
 ## 编程式使用Hystrix
+
 ### （1）HystrixCommand vs HystrixObservableCommand
 想要编程式使用Hystrix，只需要继承`HystrixCommand`或`HystrixObservableCommand`，这两者的主要区别是：
 * `HystrixCommand`的命令逻辑写在run()；`HystrixObservableCommand`的命令逻辑写在construct()。
 * `HystrixCommand`的run()是由新创建的线程执行；`HystrixObservableCommand`的construct()是由调用程序线程执行。
 * `HystrixCommand`一个实例只能向调用程序发送（emit）单条数据，也就是run()只能返回一个结果；
 `HystrixObservableCommand`一个实例可以顺序发送多条数据，顺序调用多个onNext()，便实现了向调用程序发送多条数据，甚至还能发送一个范围的数据集。
+
 ### （2）4个命令执行方法
 execute()、queue()、observe()、toObservable()这4个方法用来触发执行run()/construct()，一个实例只能执行一次这4个方法，特别说明的是`HystrixObservableCommand`没有execute()和queue()，`HystrixCommand`对应run()，`HystrixObservableCommand`对应construct()。这4个方法的主要区别如下：
 * execute()：以同步堵塞方式执行run()。`HystrixCommand`实例调用execute()后，hystrix先创建一个新线程运行run()，接着调用程序要在execute()调用处一直堵塞着，直到run()运行完成。
@@ -359,6 +391,8 @@ execute()、queue()、observe()、toObservable()这4个方法用来触发执行r
 * run()/construct()运行超时：执行命令的方法超时，将会触发fallback。
 * 熔断器开启：当熔断器处于开启的状态，将会触发fallback。
 * 线程池/信号量已满：当线程池/信号量已满的状态，将会触发fallback。
+
+**这里需要注意：触发了降级逻辑不一定是熔断器开启，但是熔断器开启一定会执行降级逻辑**。
 
 ### 例子1（四种命令执行方法的结果获取）：
 ```
@@ -472,7 +506,7 @@ Execute onNext --> Hello doge toObservable,current thread:hystrix-helloWorldGrou
 Execute onCompleted
 ```
 
-### 例子2（超时熔断）：
+### 例子2（超时降级）：
 ```
 import com.netflix.hystrix.HystrixCommand;
 import com.netflix.hystrix.HystrixCommandGroupKey;
@@ -614,7 +648,7 @@ FALLBACK --> !
 ```
 
 ### （4）请求结果缓存（Request Cahce）
-hystrix支持将一个请求结果缓存起来，下一个具有相同key的请求将直接从缓存中取出结果，减少请求开销。要使用hystrix cache功能，第一个要求是重写getCacheKey()，用来构造cache key；第二个要求是构建context，如果请求B要用到请求A的结果缓存，A和B必须同处一个context。通过`HystrixRequestContext.initializeContext()`和`context.shutdown()`可以构建一个context，这两条语句间的所有请求都处于同一个context，同一个context中可以从缓存中直接获取cache key相同的响应结果。
+hystrix支持将一个请求结果缓存起来，下一个具有相同key的请求将直接从缓存中取出结果，减少请求开销。要使用hystrix cache功能，第一个要求是重写`getCacheKey()`，用来构造cache key；第二个要求是构建context，如果请求B要用到请求A的结果缓存，A和B必须同处一个context。通过`HystrixRequestContext.initializeContext()`和`context.shutdown()`可以构建一个context，这两条语句间的所有请求都处于同一个context，同一个context中可以从缓存中直接获取cache key相同的响应结果。
 
 ### 例子4（请求结果缓存）：
 ```

@@ -17,7 +17,7 @@
 可能性会比较低，当然也必须苛刻地考虑正在执行的任务（尚未执行完）丢失的情况。
 
 ## 基于内存实现延时任务的方案
-于内存实现延时任务的方案总结下来主要有以下几种：
+基于内存实现延时任务的方案总结下来主要有以下几种：
 * JDK延迟队列，主要由java.util.concurrent.DelayQueue实现。
 * JDK的ScheduledThreadPoolExecutor，也就是由调度线程池实现（当然在旧版本的JDK中可以使用Timer和TimerTask，但是ScheduledThreadPoolExecutor出现后可以取代Timer和TimerTask）。
 * 时间轮。
@@ -25,7 +25,7 @@
 ### JDK延迟队列
 Java中的DelayQueue位于java.util.concurrent包下，作为单机实现，它很好的实现了延迟一段时间后触发事件的需求。由于是线程安全的它可以有多个消费者和多个生产者，从而在某些情况下可以提升性能。DelayQueue本质是封装了一个PriorityQueue，使之线程安全，加上Delay功能，也就是说，消费者线程只能在队列中的消息“过期”之后才能返回数据获取到消息，不然只能获取到null。
 之所以要用到PriorityQueue，主要是需要排序。也许后插入的消息需要比队列中的其他消息提前触发，那么这个后插入的消息就需要最先被消费者获取，这就需要排序功能。PriorityQueue内部使用最小堆来实现排序队列。队首的，最先被消费者拿到的就是排序系数最小的那个。使用最小堆让队列在数据量较大的时候比较有优势。使用最小堆来实现优先级队列主要是因为最小堆在插入和获取时，时间复杂度相对都比较好，都是O(logN)。
-#### 使用DelayQueue
+### 使用DelayQueue
 使用DelayQueue的时候，要求DelayQueue中的元素是java.util.concurrent.Delayed的子类，因此，我们需要实现java.util.concurrent.Delayed接口，覆写两个方法`getDelay()`和`compareTo()`，前者用于控制元素剩余延迟时间，后者用于元素排序。
 #### DelayQueue使用例子
 #### DelayedTask实现了Delayed接口
@@ -189,6 +189,13 @@ public class TaskQueueDaemonThread {
 00:16:19.116 [Task Queue Daemon Thread] DEBUG org.throwable.TaskQueueDaemonThread - Execute task:org.throwable.TaskQueueDaemonThread$$Lambda$3/1323468230@50bfb93d,current timestamp:1507565779116
 延迟6000毫秒执行
 ```
+
+**注意这个例子仅仅是用于演示，切勿使用在生产环境。**
+#### JDK延迟队列DelayQueue总结
+
+* 优点：使用相对简单，编码量少。
+* 缺点：需要维护延迟队列；需要做额外的逻辑(例如守护线程轮询)来执行队列中的任务；完全基于内存，需要考虑应用出现异常导致内存数据丢失从而需要恢复任务。
+
 ### ScheduledThreadPoolExecutor
 
 ### 时间轮
@@ -203,3 +210,7 @@ public class TaskQueueDaemonThread {
 时间轮比较好的开源实现是Netty的`HashedWheelTimer`。 
 
 ## 基于介质实现延时任务的方案
+基于介质实现延时任务的方案总结下来主要有以下几种：
+* Quartz，基于定时任务扫库，这个是数据量少时候最有效粗暴的方式，分布式下常用的基于Quartz进行二次开发的分布式调度框架有TBSchedule或Elastic-Job等。
+* 基于Redis的有序集合ZSet实现类似分布式延迟队列的功能，已经有现成的实现：Jesque，但是Jesque的文档相对较少，具体生产环境使用的规模也无法估计。
+* 基于Rabbitmq的TTL和DXL。
