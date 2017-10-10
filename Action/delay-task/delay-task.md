@@ -25,10 +25,13 @@
 ### JDK延迟队列
 Java中的DelayQueue位于java.util.concurrent包下，作为单机实现，它很好的实现了延迟一段时间后触发事件的需求。由于是线程安全的它可以有多个消费者和多个生产者，从而在某些情况下可以提升性能。DelayQueue本质是封装了一个PriorityQueue，使之线程安全，加上Delay功能，也就是说，消费者线程只能在队列中的消息“过期”之后才能返回数据获取到消息，不然只能获取到null。
 之所以要用到PriorityQueue，主要是需要排序。也许后插入的消息需要比队列中的其他消息提前触发，那么这个后插入的消息就需要最先被消费者获取，这就需要排序功能。PriorityQueue内部使用最小堆来实现排序队列。队首的，最先被消费者拿到的就是排序系数最小的那个。使用最小堆让队列在数据量较大的时候比较有优势。使用最小堆来实现优先级队列主要是因为最小堆在插入和获取时，时间复杂度相对都比较好，都是O(logN)。
+
 ### 使用DelayQueue
 使用DelayQueue的时候，要求DelayQueue中的元素是java.util.concurrent.Delayed的子类，因此，我们需要实现java.util.concurrent.Delayed接口，覆写两个方法`getDelay()`和`compareTo()`，前者用于控制元素剩余延迟时间，后者用于元素排序。
+
 #### DelayQueue使用例子
-#### DelayedTask实现了Delayed接口
+
+DelayedTask实现了Delayed接口
 ```
 import java.util.concurrent.Delayed;
 import java.util.concurrent.TimeUnit;
@@ -98,7 +101,7 @@ public class DelayedTask<T extends Runnable> implements Delayed {
 	}
 }
 ```
-#### TaskQueueDaemonThread用于管理DelayQueue
+TaskQueueDaemonThread用于管理DelayQueue
 ```
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -181,7 +184,7 @@ public class TaskQueueDaemonThread {
 	}
 }
 ```
-#### 运行TaskQueueDaemonThread中的main函数，控制台输出如下：
+运行TaskQueueDaemonThread中的main函数，控制台输出如下：
 ```
 00:16:13.133 [Task Queue Daemon Thread] DEBUG org.throwable.TaskQueueDaemonThread - Daemon thread starts...
 延迟5000毫秒执行
@@ -191,12 +194,76 @@ public class TaskQueueDaemonThread {
 ```
 
 **注意这个例子仅仅是用于演示，切勿使用在生产环境。**
+
 #### JDK延迟队列DelayQueue总结
 
 * 优点：使用相对简单，编码量少。
 * 缺点：需要维护延迟队列；需要做额外的逻辑(例如守护线程轮询)来执行队列中的任务；完全基于内存，需要考虑应用出现异常导致内存数据丢失从而需要恢复任务。
 
 ### ScheduledThreadPoolExecutor
+ScheduledThreadPoolExecutor是JDK(1.5以上)自带的一种线程池，它是ScheduledExecutorService的实现，能调度一些命令在一段时间之后执行，或者周期性的执行。
+ScheduledThreadPoolExecutor提供了一种并行处理的模型，简化了线程的调度。它内部使用的DelayedWorkQueue是类似DelayQueue的实现，也是基于最小堆的、线程安全的数据结构。
+ScheduledExecutorService比上面一种DelayQueue更加实用。因为，一般来说，使用DelayQueue获取消息后触发事件都会实用多线程的方式执行(需要做额外的执行逻辑)，以保证其他事件能准时进行。而ScheduledThreadPoolExecutor就是对这个过程进行了封装，让大家更加方便的使用。
+同时在加强了部分功能，比如定时触发、周期性触发。
+
+#### 使用ScheduledThreadPoolExecutor的例子
+每个打印任务延迟i秒执行：
+```
+pimport io.netty.util.HashedWheelTimer;
+ import io.netty.util.Timeout;
+ import io.netty.util.TimerTask;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+ import java.util.concurrent.TimeUnit;
+ 
+ /**
+  * @author throwable
+  * @version v1.0
+  * @description
+  * @since 2017/10/10 23:33
+  */
+ public class HashedWheelTimerDemo {
+ 
+ 	private static final Logger LOGGER = LoggerFactory.getLogger(HashedWheelTimerDemo.class);
+ 
+ 	public static void main(String[] args) throws Exception {
+ 		HashedWheelTimer wheelTimer = new HashedWheelTimer();
+ 		wheelTimer.newTimeout(new Task(), 5, TimeUnit.SECONDS);
+ 		wheelTimer.newTimeout(new Task(), 10, TimeUnit.SECONDS);
+ 		wheelTimer.newTimeout(new Task(), 15, TimeUnit.SECONDS);
+ 
+ 		Thread.sleep(Integer.MAX_VALUE);
+ 	}
+ 
+ 	protected static class Task implements TimerTask {
+ 
+ 		@Override
+ 		public void run(Timeout timeout) throws Exception {
+ 			LOGGER.info("Task executes....");
+ 		}
+ 	}
+ }
+```
+运行main函数后控制台输出：
+```
+23:14:50.227 [pool-1-thread-1] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:12
+23:14:51.226 [pool-1-thread-2] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:13
+23:14:52.226 [pool-1-thread-3] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:14
+23:14:53.225 [pool-1-thread-4] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:15
+23:14:54.226 [pool-1-thread-5] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:16
+23:14:55.226 [pool-1-thread-6] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:17
+23:14:56.226 [pool-1-thread-7] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:18
+23:14:57.228 [pool-1-thread-8] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:19
+23:14:58.226 [pool-1-thread-9] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:20
+23:14:59.226 [pool-1-thread-10] INFO org.throwable.ScheduledThreadPoolExecutorDemo - Execution starts,current threadId:21
+```
+
+#### ScheduledThreadPoolExecutor总结
+* 优点：简单，并且具备定时调度功能，满足绝大多数场景的需要。
+* 缺点：完全基于内存，需要考虑应用出现异常导致内存数据丢失从而需要恢复任务。
+
+**如果要在DelayQueue和ScheduledThreadPoolExecutor选择，那么一定要选择使用ScheduledThreadPoolExecutor。**
 
 ### 时间轮
 时间轮是一种非常惊艳的数据结构。其在Linux内核中使用广泛，是Linux内核定时器的实现方法和基础之一。
@@ -208,6 +275,68 @@ public class TaskQueueDaemonThread {
 这个数据结构最重要的是两个指针，一个是触发任务的函数指针，另外一个是触发的总第几圈数。时间轮可以用简单的数组或者是环形链表来实现。
 相比DelayQueue的数据结构，时间轮在算法复杂度上有一定优势。DelayQueue由于涉及到排序，需要调堆，插入和移除的复杂度是O(lgn)，而时间轮在插入和移除的复杂度都是O(1)。
 时间轮比较好的开源实现是Netty的`HashedWheelTimer`。 
+
+**对于netty的``，下面简单说明一下它的使用：**
+
+HashedWheelTimer有多个构造函数。其中：
+- ThreadFactory ：创建线程的类，默认Executors.defaultThreadFactory()。
+- TickDuration：多少时间指针顺时针转一格，单位由下面一个参数提供。
+- TimeUnit：上一个参数的时间单位。
+- TicksPerWheel：时间轮上的格子数。
+
+如果一个任务要在120s后执行，时间轮是默认参数的话，那么这个任务在时间轮上需要经过120000ms / (512 * 100ms) = 2轮，120000ms % (512 * 100ms) = 176格。
+在使用HashedWheelTimer的过程中，延迟任务的实现最好使用异步的，HashedWheelTimer的任务管理和执行都在一个线程里面。如果任务比较耗时，那么指针就会延迟，导致整个任务就会延迟。
+
+#### HashedWheelTimer使用例子
+```
+import io.netty.util.HashedWheelTimer;
+import io.netty.util.Timeout;
+import io.netty.util.TimerTask;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.TimeUnit;
+
+/**
+ * @author throwable
+ * @version v1.0
+ * @description
+ * @since 2017/10/10 23:33
+ */
+public class HashedWheelTimerDemo {
+
+	private static final Logger LOGGER = LoggerFactory.getLogger(HashedWheelTimerDemo.class);
+
+	public static void main(String[] args) throws Exception {
+		HashedWheelTimer wheelTimer = new HashedWheelTimer();
+		wheelTimer.newTimeout(new Task(), 5, TimeUnit.SECONDS);
+		wheelTimer.newTimeout(new Task(), 10, TimeUnit.SECONDS);
+		wheelTimer.newTimeout(new Task(), 15, TimeUnit.SECONDS);
+
+		Thread.sleep(Integer.MAX_VALUE);
+	}
+
+	protected static class Task implements TimerTask {
+
+		@Override
+		public void run(Timeout timeout) throws Exception {
+			LOGGER.info("Task executes....");
+		}
+	}
+}
+```
+等待十五秒后控制台输出：
+```
+23:36:53.854 [pool-1-thread-1] INFO org.throwable.HashedWheelTimerDemo - Task executes....
+23:36:58.855 [pool-1-thread-1] INFO org.throwable.HashedWheelTimerDemo - Task executes....
+23:37:03.855 [pool-1-thread-1] INFO org.throwable.HashedWheelTimerDemo - Task executes....
+```
+
+#### 时间轮总结
+* 优点：高效，低延迟。
+* 缺点：完全基于内存，需要考虑应用出现异常导致内存数据丢失从而需要恢复任务；占用内存高。
+
+**如果你的应用需要使用基于内存的延迟任务而且要求高效低延迟，可以选择时间轮实现，可以选择Netty的HashedWheelTimer或者参照其源码进行改造，但是前提是你的服务器要有足够的内存。**
 
 ## 基于介质实现延时任务的方案
 基于介质实现延时任务的方案总结下来主要有以下几种：
